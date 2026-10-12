@@ -1,0 +1,109 @@
+# Using the pipeline day to day
+
+You steer `/spec-pipeline` in plain English. You never type JSON, never pick a stage name the files can
+determine, and never confirm a slug.
+
+## Cheat sheet
+
+| You say | What happens |
+|---|---|
+| `/spec-pipeline <idea>` | A slug is chosen and announced ("Using slug `partial-refunds`."), triage runs, and the chain auto-advances while the gate is clear. |
+| `/spec-pipeline advance` (or "next", "go on", "proceed") | Runs the stage the files on disk say is next. After a green validate, that is ship. |
+| `/spec-pipeline refine: <notes>` | Inline edit when the notes are local; a structural re-run of the same stage when they cascade. |
+| `/spec-pipeline rewind to <stage>` | Re-runs an earlier stage with your correction; later stages re-run after it. |
+| "retry that phase on fable" | Re-sends the unpassed phases with `implModel` = `models.escalation`, for this run only. |
+| "run this stage on opus" | Sets `model` for one call: drafters, revisers, dev agents, and reviews run on it. Critics, the checker, and validate keep their tiers. |
+| `/spec-pipeline <idea>` for a slug that already has artifacts | Reports where it stands and treats the request as advance or refine; triage is never overwritten. |
+| after `/resume`, or in a new session | Just say `advance`. |
+
+Only one stage runs at a time. If a stage is running, wait for it.
+
+## What stops the chain, and what to do
+
+| Stop | What you see | Your move |
+|---|---|---|
+| **Open questions** | Each question with a plain-language lead paragraph and 2-4 options, the recommended one first | Answer. Answers are recorded verbatim in the artifact and the chain resumes if nothing else needs you. |
+| **Blocked triage** | The section it blocked on, the reason, and its `B` questions marked "Blocking - triage cannot route until this is decided." | Answer the `B` questions. Your answer re-runs triage; `advance` is refused until then. |
+| **Malformed triage** | An error naming the missing routing fields | Nothing to answer. If the artifact is fine, `advance` (routing is recovered from it); otherwise re-run triage. |
+| **Divergent return** | The return and the artifact's status disagree | The file wins. Inspect it, fix it or re-run the stage. |
+| **Unclean critique** | "written but still flagged" plus the residual issues | Judge them: `advance` if they don't matter, `refine:` if they do. |
+| **Critique unavailable** | "verdict unavailable" | The critic died. Re-run or review the artifact yourself. |
+| **Halted phase** | The phase, its unmet criteria and blocking concerns, the phases not yet run | Fix directly, `refine:` the spec, `rewind`, or escalate. Then `advance` re-sends from the halted phase. |
+| **Validate failed** | Per-suite counts and failing test ids | Fix, then `advance` (validate runs again). Never ship on red. |
+
+When reading implement results:
+
+- **"review not run"** (`sound: null`) means the criteria check failed first. The architect found nothing;
+  it never looked.
+- **Deferred criteria** ("3 criteria met, 1 deferred to validate") named a whole-suite run; a narrow run
+  substituted, and validate settles the global claim. Not failures.
+- **Observations** are true but non-blocking (adjacent defects, follow-ups, wording drift). They go into the
+  PR body at ship.
+
+## Refining: inline vs structural
+
+**Inline** (the default): selecting an option, fixing wording or terminology, a small factual correction,
+adding or dropping a detail that does not cascade. The orchestrator edits the artifact directly and makes
+**no workflow call**: a two-line decision is a 30-second edit, not an agent fan-out.
+
+**Structural** (a workflow round): your note changes the lane or change type; adds or removes goals or
+non-goals; alters the design, the Invariance section, or the phase decomposition; answers an entry raised
+by an unfillable `## ORDER` or `## VALIDATE`; or answers a blocking `B` entry. The same stage re-runs with
+your notes as `feedback`. One reviser applies them in place and one critic checks only your points. Spec
+revisions re-read the scope first, because the scope binds the spec's Goals and Non-Goals.
+
+When unsure, the orchestrator chooses inline. An inline refine you initiate does not resume the chain; say
+`advance` when ready.
+
+Send only this round's notes. Earlier rounds are already in the artifact.
+
+## Escalation and tiers
+
+Dev agents run on `models.impl` (`opus` by default). The top tier is held for the spec. To escalate a
+halted phase, ask for it explicitly ("retry that phase on fable"). The orchestrator sets `implModel` for that
+one run and does not carry it forward. It never escalates on its own initiative.
+
+If the top tier is unavailable to you, set `models.spec` and `models.escalation` to `opus` in the config.
+
+## The artifacts
+
+| File | Stage | Contents |
+|---|---|---|
+| `<specs_dir>/<slug>-triage.md` | triage | verified claims, lane, change type, target region, exclusions, decisions |
+| `<specs_dir>/<slug>-scope.md` | scope | executive summary, goals, non-goals, files affected, dependencies, open questions |
+| `<specs_dir>/<slug>.md` | spec | design, invariance, phased plan with routing, scope, tests, and acceptance criteria |
+
+- They are **untracked** while you work. Read them and edit them freely; the next stage reads whatever is on disk.
+- Entering implement flips the spec to `**Status**: Final` (that is the approval).
+- **Ship** commits them with the implementation (only this slug's three), links the spec by SHA, then removes
+  them from the branch tip with `chore(specs): remove <slug> pipeline artifacts`. With
+  `remove_artifacts_after_pr: false` they stay and merge with the PR.
+- Never `git add -A` over the specs directory and never glob-delete in it: it holds the templates and other
+  workstreams' drafts.
+
+## Several workstreams at once
+
+Each slug has its own artifacts, so you can triage, scope, and spec several workstreams in the same
+checkout. Implement is different: it needs the slug's branch checked out, and there is one working tree. Run
+one workstream through implement, validate, and ship at a time. Untracked drafts of other slugs ride along
+harmlessly across checkouts and are excluded from every ship commit.
+
+## Rework after ship
+
+1. Find `<spec-sha>`: the permalink in the PR body, or the parent of the removal commit.
+2. Restore the artifacts:
+   `git restore --source=<spec-sha> -- <specs_dir>/<slug>-triage.md <specs_dir>/<slug>-scope.md <specs_dir>/<slug>.md`
+3. `rewind` or `refine` as usual; then validate.
+4. The orchestrator commits the rework without the artifacts and pushes to the existing PR, then deletes the
+   restored files. If the rework changed an artifact, it is committed and then removed again, so the revision
+   is in history.
+
+## Good ideas to feed it
+
+The idea is prose, but the better it names surfaces, the less triage has to discover:
+
+> Partial refunds: let a support agent refund part of an order; the refunded total may never exceed the
+> captured amount; show the refunded-so-far figure in the order table.
+
+Triage treats every claim in your idea as something to verify. If you say "the endpoint already exists",
+it checks. A falsified premise is a result, and may block triage until you decide what you actually want.

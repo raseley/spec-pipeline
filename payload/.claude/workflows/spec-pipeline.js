@@ -1,0 +1,1183 @@
+export const meta = {
+  name: "spec-pipeline",
+  description:
+    "Run one stage of triage -> scope -> spec -> implement -> validate for a workstream, writing <specs_dir>/<slug>-*.md (docs/specs by default). The workflow is re-entrant. The orchestrating session passes the stage to run and the project configuration (.claude/spec-pipeline.json) as args.config. The orchestrator reviews each return. It auto-advances to the next stage when no open_questions, block, halt, or failure needs the human. Otherwise the human reviews and then advances or refines. Structural rework re-invokes the same stage with feedback, and the stage revises its artifact in place. The orchestrator applies trivial edits inline without a workflow run. The git-tracked <specs_dir>/<slug>-*.md files carry state across invocations and across sessions. Nothing depends on a long-running process.",
+  phases: [
+    // `model` here is display-only, and it shows the default tier (config.models). The tier each
+    // call actually runs on is set by the `model` option on its agent() call below, read from
+    // args.config.models; every call sets one explicitly, so no call inherits the session model
+    // or an agent definition's frontmatter.
+    { title: "Triage",    detail: "Verify the raw idea against the tree, route to a configured lane's architect and classify the change type (branch prefix) - or return blocked when routing cannot be decided; write <specs_dir>/<slug>-triage.md; triage-tier draft/revise, critic-tier critic", model: "opus" },
+    { title: "Scope",     detail: "Goals, non-goals, files-affected; write <specs_dir>/<slug>-scope.md; scope-tier draft/revise, critic-tier critic", model: "opus" },
+    { title: "Spec",      detail: "Draft <specs_dir>/<slug>.md per <specs_dir>/spec-template.md (Status: Draft); spec-tier (top tier by default) draft/revise, critic-tier critic", model: "fable" },
+    { title: "Implement", detail: "Run each spec phase via its routed dev agent (impl tier; implModel escalates); criteria-check (check tier), then qualitative architect review (review tier) only if that passes; halts at the first failing phase", model: "opus" },
+    { title: "Validate",  detail: "Full-suite regression gate before ship: run every configured full suite, report-only", model: "sonnet" }
+  ]
+};
+
+// `args` is an internal contract assembled by the orchestrating session from the
+// developer's plain English (see .claude/commands/spec-pipeline.md), never hand-typed.
+//   config    the parsed .claude/spec-pipeline.json, passed verbatim on every call. This script
+//             has no filesystem access, so the config is its only view of the project: lanes,
+//             agents, test commands, paths, invariants, and model tiers all come from here.
+//   stage     which single stage to run: "triage" | "scope" | "spec" | "implement" | "validate"
+//   slug      kebab-case workstream slug; names the <specs_dir>/<slug>-*.md corpus and the
+//             <prefix>/<slug> branch (prefix per triage, one of config.git.branch_prefixes)
+//   date      today's date (YYYY-MM-DD) stamped from session context. The body must not read a clock.
+//   idea      the developer's raw idea prose (triage only)
+//   feedback  this round's reviewer notes, for structural rework only (optional). The orchestrator
+//             applies trivial edits inline without invoking the workflow. It sends only the
+//             current round's notes, because prior rounds are already in the on-disk artifact.
+//             It passes feedback only when the stage's artifact already exists on disk. The
+//             stage then revises that artifact in place instead of redrafting it.
+//   architect carried forward from the triage return (or recovered from the triage artifact's
+//             **Lane**: line): one of config.lanes[].architect. Required for scope, spec, implement.
+//   phases    always rebuilt by the orchestrator from <specs_dir>/<slug>.md's phase headings
+//             and "**Agent routing**:" lines, never carried forward from the spec return, so the
+//             on-disk spec is the single source of truth: [{ title, agent, scope, acceptance }].
+//             On re-entry after a halt, the orchestrator sends only the phases not yet passed
+//             (see the command doc, Step 3). The loop below runs whatever it receives.
+//   model     optional model override for every drafter, reviser, dev, and architect-review call,
+//             replacing that call's configured tier (e.g. "opus" when the spec tier is unavailable).
+//             Critics, the criteria checker, and validate keep their own configured tiers.
+//   implModel optional model for the implement stage's dev-agent calls only. It wins over `model`
+//             and over config.models.impl. Use it to escalate: resend a halted phase with
+//             implModel set to config.models.escalation without raising any other call's tier.
+// `branch_prefix` is deliberately not an arg. Only the orchestrator uses it (branch setup, ship).
+// `args` may arrive as a parsed object or as a JSON string depending on the host runtime, so
+// normalize before destructuring. JSON.parse is a standard built-in with no clock and no randomness.
+const a = typeof args === "string" ? JSON.parse(args) : (args || {});
+const { slug, idea, date, stage, feedback, architect, phases, model, implModel } = a; // no new Date() in body
+// Every agent() call below sets `model` explicitly. An omitted `model` would inherit the
+// session model, not the agentType definition's frontmatter, so no call relies on that fallback.
+// The `model` arg replaces the configured tier of each drafter, reviser, dev, and architect-review call.
+
+// --- Configuration ---
+// The config arrives as data in args. These two functions are pure: object spreads and checks,
+// no I/O. Defaults here match docs/configuration.md and the command's own defaults, so a key the
+// adopter omitted means the same thing to both.
+const DEFAULT_MODELS = {
+  triage: "opus", scope: "opus", spec: "fable", critic: "opus",
+  impl: "opus", check: "opus", review: "opus", validate: "sonnet", escalation: "fable"
+};
+
+function isObj(x) { return !!x && typeof x === "object" && !Array.isArray(x); }
+function trimSlash(p) { return typeof p === "string" ? p.replace(/\/+$/, "") : p; }
+
+function withDefaults(cfg) {
+  if (!isObj(cfg)) return null;
+  return {
+    ...cfg,
+    project: { description: "", ...(isObj(cfg.project) ? cfg.project : {}) },
+    specs_dir: trimSlash(cfg.specs_dir || "docs/specs"),
+    agents_dir: trimSlash(cfg.agents_dir || ".claude/agents"),
+    rules_dir: trimSlash(cfg.rules_dir || ".claude/rules"),
+    steering: {
+      file: "CLAUDE.md",
+      routing_heading: "### Agent Selection",
+      invariants_heading: "## Critical Constraints",
+      anti_patterns_heading: "### LLM-Behavior Corrections",
+      reference_heading: "## Reference",
+      ...(isObj(cfg.steering) ? cfg.steering : {})
+    },
+    git: { base_branch: "main", remote: "origin", branch_prefixes: ["feat", "fix"], ...(isObj(cfg.git) ? cfg.git : {}) },
+    ship: { forge: "github", remove_artifacts_after_pr: true, ...(isObj(cfg.ship) ? cfg.ship : {}) },
+    triage_agent: cfg.triage_agent || null,
+    lanes: Array.isArray(cfg.lanes)
+      ? cfg.lanes.map(l => (isObj(l) ? { other_agents: [], narrow_dirs: [], ...l } : l))
+      : cfg.lanes,
+    unlaned_agents: cfg.unlaned_agents || [],
+    suites: Array.isArray(cfg.suites)
+      ? cfg.suites.map(s => (isObj(s) ? { lane: null, setup: "", cwd: ".", timeout_ms: 600000, notes: "", ...s } : s))
+      : cfg.suites,
+    whole_suite_patterns: cfg.whole_suite_patterns || [],
+    invariants: cfg.invariants || [],
+    protected_guards: cfg.protected_guards || [],
+    mandatory_tests: cfg.mandatory_tests || [],
+    models: { ...DEFAULT_MODELS, ...(isObj(cfg.models) ? cfg.models : {}) }
+  };
+}
+
+// Returns a string naming the first problem, or null. It checks only what this script relies on;
+// the full JSON Schema (schema/spec-pipeline.schema.json in the spec-pipeline repository) is the
+// adoption-time check. A bad config fails the call before any agent spends a token.
+function validateConfig(c) {
+  const str = (x) => typeof x === "string" && x.trim() !== "";
+  const strArr = (x) => Array.isArray(x) && x.every(str);
+  if (!c) return "args.config is missing; the orchestrator must pass the parsed .claude/spec-pipeline.json on every call";
+  if (c.version !== 1) return `version must be 1 (got ${JSON.stringify(c.version)})`;
+  if (!isObj(c.project) || !str(c.project.name)) return "project.name is required";
+  for (const k of ["specs_dir", "agents_dir", "rules_dir"]) if (!str(c[k])) return `${k} must be a non-empty string`;
+  for (const k of ["file", "routing_heading", "invariants_heading", "anti_patterns_heading", "reference_heading"]) {
+    if (!str(c.steering[k])) return `steering.${k} must be a non-empty string`;
+  }
+  if (!str(c.git.base_branch) || !str(c.git.remote)) return "git.base_branch and git.remote must be non-empty strings";
+  if (!strArr(c.git.branch_prefixes) || c.git.branch_prefixes.length === 0) return "git.branch_prefixes must be a non-empty array of strings";
+  if (c.triage_agent !== null && !str(c.triage_agent)) return "triage_agent must be a non-empty string or null";
+  if (!Array.isArray(c.lanes) || c.lanes.length === 0) return "lanes must be a non-empty array";
+  const seen = [];
+  for (const [i, l] of c.lanes.entries()) {
+    if (!isObj(l)) return `lanes[${i}] must be an object`;
+    for (const k of ["name", "description", "architect", "dev", "targeted_tests"]) {
+      if (!str(l[k])) return `lanes[${i}].${k} must be a non-empty string`;
+    }
+    if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(l.name)) return `lanes[${i}].name "${l.name}" must be kebab-case`;
+    if (seen.includes(l.name)) return `lane name "${l.name}" is not unique`;
+    seen.push(l.name);
+    if (!strArr(l.paths) || l.paths.length === 0) return `lanes[${i}].paths must be a non-empty array of globs`;
+    if (!strArr(l.other_agents)) return `lanes[${i}].other_agents must be an array of strings`;
+    if (!strArr(l.narrow_dirs)) return `lanes[${i}].narrow_dirs must be an array of strings`;
+  }
+  if (!strArr(c.unlaned_agents)) return "unlaned_agents must be an array of strings";
+  const laned = c.lanes.flatMap(l => [l.architect, l.dev, ...l.other_agents]);
+  const both = c.unlaned_agents.find(x => laned.includes(x));
+  if (both) return `"${both}" is listed both in a lane and in unlaned_agents`;
+  if (!Array.isArray(c.suites) || c.suites.length === 0) return "suites must be a non-empty array";
+  for (const [i, s] of c.suites.entries()) {
+    if (!isObj(s)) return `suites[${i}] must be an object`;
+    if (!str(s.name) || !str(s.command)) return `suites[${i}] needs a non-empty name and command`;
+    if (!str(s.cwd)) return `suites[${i}].cwd must be a non-empty string`;
+    if (typeof s.setup !== "string" || typeof s.notes !== "string") return `suites[${i}].setup and .notes must be strings`;
+    if (!Number.isInteger(s.timeout_ms) || s.timeout_ms < 1 || s.timeout_ms > 1800000) {
+      return `suites[${i}].timeout_ms must be an integer in 1..1800000 (the Bash tool's 30-minute cap)`;
+    }
+  }
+  if (new Set(c.suites.map(s => s.name)).size !== c.suites.length) return "suite names must be unique";
+  if (!strArr(c.whole_suite_patterns)) return "whole_suite_patterns must be an array of strings";
+  if (!strArr(c.invariants)) return "invariants must be an array of strings";
+  if (!strArr(c.protected_guards)) return "protected_guards must be an array of strings";
+  if (!Array.isArray(c.mandatory_tests)) return "mandatory_tests must be an array";
+  for (const [i, t] of c.mandatory_tests.entries()) {
+    if (!isObj(t) || !str(t.when) || !str(t.requires)) return `mandatory_tests[${i}] needs non-empty "when" and "requires"`;
+    if (t.rule !== undefined && t.rule !== null && typeof t.rule !== "string") return `mandatory_tests[${i}].rule must be a string`;
+  }
+  for (const k of Object.keys(DEFAULT_MODELS)) if (!str(c.models[k])) return `models.${k} must be a non-empty string`;
+  return null;
+}
+
+const c = withDefaults(a.config);
+const cfgError = validateConfig(c);
+if (cfgError) {
+  log(`spec-pipeline: invalid config - ${cfgError}. Nothing was run.`);
+  return { stage, error: `invalid config: ${cfgError}` };
+}
+
+// Everything project-specific below is derived from the config, including the JSON-schema enums.
+// A single-lane project yields one-element enums, which are valid JSON Schema.
+const M           = c.models;
+const SPECS       = c.specs_dir;   // every artifact and template path is `${SPECS}/...`
+const LANE_NAMES  = c.lanes.map(l => l.name);
+const ARCHITECTS  = [...new Set(c.lanes.map(l => l.architect))];
+const DEVS        = [...new Set(c.lanes.map(l => l.dev))];
+const PREFIXES    = c.git.branch_prefixes;
+const ROUTABLE    = [...new Set(c.lanes.flatMap(l => [l.architect, l.dev, ...l.other_agents]).concat(c.unlaned_agents))];
+const NARROW_DIRS = c.lanes.flatMap(l => l.narrow_dirs);
+// The suites validate runs are, by definition, the whole-suite invocations implement must not run.
+// Each entry names the command, where it runs from, and which suite it collects, so a targeted
+// run of the same runner (a command plus a path) is not mistaken for it.
+const WHOLE_SUITE = c.suites
+  .map(s => `\`${s.command}\`${s.cwd !== "." ? ` from ${s.cwd}/` : ""} (the whole ${s.name} suite)`)
+  .concat(c.whole_suite_patterns);
+
+// An agent is mapped to the one lane that lists it. An agent listed by several lanes (for example
+// `general-purpose` used for every lane) is ambiguous and maps to no lane; callers then fall back
+// to the workstream's architect rather than guessing.
+const laneOf = (agent) => {
+  const hits = c.lanes.filter(l => l.architect === agent || l.dev === agent || l.other_agents.includes(agent));
+  return hits.length === 1 ? hits[0] : null;
+};
+
+// Role sentence for every agent call that runs as a project agent. The definition file is cited
+// "where the project ships one", because a lane may use a built-in agent type with no file.
+const roleOf = (agent) =>
+  `You are the \`${agent}\` subagent. Its definition, where the project ships one, is \`${c.agents_dir}/${agent}.md\`.`;
+
+// "A concrete surface" replaces any project vocabulary in the prompts. Goals, falsifiers, and
+// anchors must land on something the tree can confirm or refute.
+const SURFACE = "a concrete surface of this repository (a repo-rooted path, a symbol, a route, a test id, or a command's output)";
+
+// The routing table, inlined from config. The steering file's routing heading is a
+// cross-reference for the human-readable version; this table is what the triage agents route by,
+// so routing never depends on a heading the adopter may have renamed.
+const LANE_TABLE = c.lanes.map(l =>
+    `- lane "${l.name}": ${l.description} Owns: ${l.paths.join(", ")}. Architect: ${l.architect}. Dev: ${l.dev}.${l.other_agents.length ? ` Other agents: ${l.other_agents.join(", ")}.` : ""}`
+  ).join("\n")
+  + (c.unlaned_agents.length ? `\nUnlaned agents (routable on a phase, never a triage role): ${c.unlaned_agents.join(", ")}.` : "")
+  + `\n"manual" is not a routed outcome.`;
+
+// open_questions lets any stage hand a decision back to the human between invocations.
+// A workflow cannot prompt mid-run (AskUserQuestion is a main-loop tool, absent here), so a
+// stage stops at its artifact and surfaces residual decisions rather than guessing past them.
+//
+// `context` is the field the operator reads first, and it is required. The stage that raised the
+// question is the only party still holding the reasoning behind it. By the time the orchestrator
+// renders the prompt, it has only these fields plus whatever it re-reads off disk. A paraphrase
+// written at that point has to rebuild lost reasoning, and that is where it goes wrong or turns
+// into filler. Because the schema requires it, a missing or empty `context` is a validation
+// failure the agent retries, not prose guidance that gets ignored in a long prompt.
+const OQ = {
+  type: "array",
+  items: {
+    type: "object",
+    required: ["question", "context", "options"],
+    properties: {
+      question: { type: "string" },
+      context:  { type: "string" },
+      // The 2-4 bound is enforced here, not left to OQ_GUIDANCE prose. A one-option entry is
+      // not a decision, because there is nothing to choose. A five-option entry does not fit
+      // AskUserQuestion, which caps at 4. The orchestrator cannot render either one to the
+      // developer. A schema bound makes the agent retry. A prose rule tends to get ignored.
+      options:  {
+        type: "array",
+        minItems: 2,
+        maxItems: 4,
+        items: {
+          type: "object",
+          required: ["label", "description"],
+          properties: { label: { type: "string" }, description: { type: "string" } }
+        }
+      },
+      recommended: { type: "string" } // must match one options[].label, or be omitted
+    }
+  }
+};
+
+// Interpolated into every doc stage's drafter and reviser prompt so the three stages describe the
+// returned `context` the same way. Only the plain-language rule lives here. The 2-4 option bound
+// is in the schema (OQ above). Copying the artifact's entries into the return is each stage's
+// contract below.
+const OQ_GUIDANCE =
+  `open_questions is a returned field. The artifact's own question section stays technical.
+   Each open_questions entry follows these rules:
+   - "question" is the decision as one direct sentence.
+   - "options" are the concrete choices.
+   - Each option is a label of a few words plus what picking it means.
+   - Never use free text where the choices can be listed.
+   - "recommended" is the label you would pick.
+   - Omit "recommended" entirely when you have no lean.
+   - "context" is one paragraph or less of plain language.
+   - Write "context" for someone who has not read the artifact and does not know this subsystem.
+   - "context" says what decision is on the table.
+   - "context" says what changes downstream depending on the answer.
+   - "context" says why the decision could not be settled automatically.
+   - "context" contains no file paths, type or class names, template or rule filenames, or pipeline jargon.
+   - The reader must be able to choose an option from "context" alone.`;
+
+// Test-run scope policy for the implement stage, interpolated into both the dev-agent prompt
+// and the criteria-checker prompt so the two agents cannot disagree about what to run.
+//
+// The spec stage writes each phase's acceptance criteria. A spec that names a whole-suite run on
+// every phase turns implement into N whole-suite runs by the dev agent plus N more by the
+// checker. Each is a multi-minute run, repeated on every phase, for a result the validate stage
+// produces once at the end for the whole workstream. The template and the spec-stage critic
+// reject whole-suite criteria when the spec is written. This policy is the runtime backstop, and
+// it also covers specs already on disk that were written before that rule. The forbidden list is
+// built from config.suites[].command plus config.whole_suite_patterns, and the per-lane recipe
+// for a targeted run from config.lanes[].targeted_tests.
+const SCOPED_TESTS =
+  `Test runs during implement are scoped to this phase and never run a whole suite.
+   Run only what covers this phase:
+   - the tests named under the phase's own Tests section.
+   - the test modules that import or exercise the files this phase touched.
+   - at most one narrow directory (${NARROW_DIRS.length ? NARROW_DIRS.join(", ") : "none is configured"}), only where the phase's surface genuinely is that whole tier.
+   How to run a targeted selection per lane:
+${c.lanes.map(l => `   - ${l.name}: ${l.targeted_tests}`).join("\n")}
+   You must not run:
+${WHOLE_SUITE.map(w => `   - ${w}.`).join("\n")}
+   - any other invocation that collects a whole suite.
+   The pipeline's validate stage owns the whole-suite regression gate and runs it once for the finished workstream.`;
+
+// Rules under the rules directory are path-scoped. They load on their own only when the Read tool
+// opens a matching source file, and agents often read source through Bash instead. So "use the
+// applicable rules" left most agents without them. The agents that rarely got them natively
+// open the rule files by name: the spec drafter, the spec critic, and the implement architect
+// review. Scope and the implement dev agent keep the plain instruction. They get rules natively
+// far more often, and the spec and review cover them. The file set differs per call and is
+// passed in. A project with no rules directory loses nothing: the instruction is conditional.
+const openRules = (fileSet) =>
+  `Before you start, if ${c.rules_dir}/ exists, list it and check each rule file's \`paths:\`
+   frontmatter. Read in full every rule whose globs match a file in ${fileSet}, and apply it.
+   A rule you have not opened is not applied.`;
+
+// Every doc stage's return carries open_questions, a field no critic can check. Every critique
+// prompt audits the file, and the returned field never appears there. So each stage's drafter and
+// reviser gets the same copying contract: the return is copied from the artifact's question
+// section rather than worked out again. It is built once here and takes what differs per stage.
+const mirroringContract = ({ section, openEntries, noneSentence }) => `
+MIRRORING. The file on disk is authoritative. Return one open_questions entry per ${openEntries}
+in the file's ${section} section, in the file's order. Return no other entries. A closed or
+Decided entry gets no return entry. If the file has the sentence "${noneSentence}", return an empty array. If you return an
+empty array, the file must have that sentence. Copy each entry's **Context** paragraph verbatim.
+Copy each **Options** label and description verbatim. Copy the **Recommended** label verbatim.
+Never rewrite these. Never invent a recommended label. Return the path of the file you actually wrote.`;
+
+// Revisers also may not touch frontmatter the harness stamps. They have no clock, and a reviser
+// that "fixes" a Date or Status makes it up.
+const frozenFrontmatter = (lines) => `
+FRONTMATTER. Leave the ${lines} lines byte-identical. The harness stamps them and you have no clock.`;
+
+// The three no-questions sentences differ on purpose (triage's plain hyphen, scope's and spec's
+// em dash). They are byte-matched against the templates and the command; do not tidy them.
+const TRIAGE_MIRROR = mirroringContract({
+  section: "## OUTPUT",
+  openEntries: `**Open** entry and one per B entry (a B entry's returned "question"
+begins with the literal "Blocking - ")`,
+  noneSentence: "No open questions - scoping may begin."
+});
+const SCOPE_MIRROR = mirroringContract({
+  section: "## Open Questions",
+  openEntries: "still-open numbered entry",
+  noneSentence: "No open questions — spec drafting may begin."
+});
+const SPEC_MIRROR = mirroringContract({
+  section: "## Open Questions",
+  openEntries: "still-open numbered entry",
+  noneSentence: "No open questions — implementation may begin."
+});
+
+// Triage's return has a discriminator the schema cannot tie to the file (see the schema note at the
+// triage stage). Drafter and reviser both read it off the artifact. The reviser is also the only
+// agent on the feedback path, which is the only legal way to answer a blocking (B) entry. So it
+// must know that answering a block is the one case where it moves the artifact out of Blocked.
+const TRIAGE_STATUS = `
+STATUS. Before returning, re-read the **Status**: line of the artifact you wrote. If it is
+Blocked, return status:"blocked" with blocked_on and blocked_reason. A Blocked return has no
+lane, architect, dev, or branch_prefix. If it is Draft or Decided, return status:"routed". Read
+lane and architect off **Lane**:. Read branch_prefix off the **Branch**: prefix. Set dev to that
+lane's dev agent from the lane table. Never invent a routing field to satisfy the schema.`;
+
+// The reviser never sees the drafter's prompt, and answering a block means routing. So the lane
+// table travels with the reviser contract too; without it a reviser could only guess a lane.
+const TRIAGE_REVISER_CONTRACT = `${TRIAGE_MIRROR}${TRIAGE_STATUS}${frozenFrontmatter("**Slug** and **Date**")}
+ANSWERING A BLOCK. This is the one case where you change that state. It applies when the feedback
+answers a B entry. Replace the unfillable section with real content. Rewrite the frontmatter to a
+routed Status, Lane, and Branch. Convert the B entry to a **Decided (${date})** entry. Return
+status:"routed". Do not leave the artifact Blocked after answering its block.
+LANES. Route only to a lane in this table, and take architect and dev from its row:
+--- lane table ---
+${LANE_TABLE}
+--- end lane table ---`;
+
+const SCOPE_REVISER_CONTRACT = `${SCOPE_MIRROR}${frozenFrontmatter("**Slug**, **Date**, and **Status**")}`;
+
+// Spec is the only stage whose artifact is bound by an upstream artifact. revise() names only the
+// artifact and the template. So a structural refine would rewrite Goals and Non-Goals without
+// seeing the scope that authorized them, unless it is told to go read it.
+const SPEC_REVISER_CONTRACT = `${SPEC_MIRROR}${frozenFrontmatter("**Date** and **Status**")}
+A spec under revision stays Status: Draft. Advancing it to Final is the operator's decision.
+UPSTREAM BINDING. Before touching ## Executive Summary, ### Goals, or ### Non-Goals, read
+${SPECS}/${slug}-scope.md. Keep those sections faithful to its ## Goals and ## Non-Goals. If a
+feedback point requires contradicting the scope, make the change. Then raise the divergence as a
+numbered ## Open Questions entry and copy it into your return. Never widen or narrow the
+commitment silently.`;
+
+// Within-stage self-refinement, two paths chosen by whether reviewer feedback is present.
+//
+// Compose (no feedback): draft -> one full adversarial audit against the template and the
+// applicable path-scoped rules -> up to 2 rounds of (revise -> scoped re-check). Only the
+// first critique is a full audit. Each re-check verifies just the issues previously raised.
+// That lets the loop stop as soon as those issues are resolved, instead of using up its round
+// cap on new nitpicks from a fresh critic. A clean re-check therefore means "the full audit's
+// issues are all resolved", not "re-audited from scratch".
+//
+// Feedback (a structural refine/rewind round): the artifact already exists on disk and
+// already passed a full audit when it was composed, so redrafting would waste that work. One
+// reviser applies the feedback to the artifact in place. Then one critic verifies only that
+// each feedback point was addressed. There is no full re-audit and no loop. Trivial edits
+// never reach this path: the orchestrator applies them inline without invoking the workflow
+// (see .claude/commands/spec-pipeline.md, Step 1a).
+//
+// The critic keeps the architect's lane (agentType) so it has the same domain context. It runs
+// on the critic tier (config.models.critic) because every critique prompt is a checklist that
+// doesn't need the drafter's model tier. The drafter and reviser share `draftModel`, which every
+// caller sets explicitly, so a revision is never written by a weaker model than the draft it
+// overwrites and no stage inherits its tier from the session or an agent definition. The
+// critique returned is the one that followed the last write, so the verdict always reflects the
+// final on-disk artifact. The orchestrator reports "written but still flagged" rather than
+// implying clean. A null critique means the critic agent was skipped or died: the verdict is
+// unknown, not clean.
+//
+// Both paths replace the whole structured return with the reviser's, `open_questions` included.
+// So every reviser gets OQ_GUIDANCE. On the compose path, where a prior round exists, it is also
+// handed those questions to carry forward verbatim. The critics cannot catch a mistake here:
+// they audit the artifact, and the returned plain-language open_questions never appear there.
+//
+// `stageInstructions` is the one per-stage extension point on that reviser prompt. It is an
+// optional string appended at the end, and it reaches both paths because both call the same
+// revise(). It carries a contract between a stage's return and its own artifact that no critic
+// can enforce (triage's Status/Lane/Branch agreement, see TRIAGE_REVISER_CONTRACT). It defaults
+// to "", so a caller that omits it changes nothing.
+async function refine(agentType, draftPrompt, critiquePrompt, schema, label, ph, artifactPath, templatePath, { draftModel, feedback, stageInstructions = "" } = {}) {
+  const draftOpts = { model: model || draftModel };
+  const critic = (prompt) => agent(
+    `${prompt} Set clean=true only if nothing checked is unmet. Otherwise list every unmet point in issues.`,
+    {
+      label: `${label}:critic`, phase: ph, agentType, model: M.critic,
+      schema: {
+        type: "object", required: ["clean", "issues"],
+        properties: {
+          clean: { type: "boolean" },
+          issues: { type: "array", items: { type: "string" } }
+        }
+      }
+    }
+  );
+  // The reviser inherits `schema`, so it must re-emit `open_questions`. Without help it would
+  // never see the plain-language rule (OQ_GUIDANCE) or the rule that the return is copied from
+  // the artifact (the stage's contract, appended via stageInstructions). Without both, a
+  // revision round silently rewrites the drafter's questions and nothing catches it. Every
+  // critique prompt audits the file, and open_questions is a return-only field never written there.
+  const hasOQ = Boolean(schema?.properties?.open_questions);
+  const oqInstructions = (priorOQ) => {
+    if (!hasOQ) return "";
+    // Carrying forward needs the prior round's questions supplied verbatim, because a
+    // fresh-context reviser has never seen them. Without a prior round, the entries are copied
+    // from the artifact's own question section, whose **Context** sub-bullet is already plain language.
+    const carry = priorOQ
+      ? `\nCarry open_questions forward verbatim from the previous round reproduced below. Keep
+         the same wording for every question and context. Keep the same option labels and
+         descriptions. Keep the same recommended label. Revise an entry only where a point above
+         directly implicates it. Then revise only that entry.\n--- previous open_questions ---\n${JSON.stringify(priorOQ, null, 2)}\n--- end previous open_questions ---`
+      : `\nThere is no previous round to carry open_questions forward from. Copy them from the
+         artifact's question section as the MIRRORING rules below say.`;
+    return `\n${OQ_GUIDANCE}${carry}`;
+  };
+  const revise = (instructions, priorOQ) => agent(
+    `Read ${artifactPath} and revise it in place. Each agent call is a fresh context. Start by
+     reading the artifact and ${templatePath}. Keep the artifact within the template's section
+     bounds. Change nothing the points below do not implicate. Do not introduce new issues.
+     Overwrite ${artifactPath} in place.\n${instructions}${oqInstructions(priorOQ)}${stageInstructions}`,
+    { label: `${label}:revise`, phase: ph, agentType, schema, ...draftOpts }
+  );
+
+  if (feedback) {
+    const result = await revise(
+      `--- reviewer feedback (address every point) ---\n${feedback}\n--- end feedback ---`
+    );
+    if (!result) return { result: null, critique: null }; // reviser skipped/died — nothing written to critique
+    const critique = await critic(
+      `Read ${artifactPath}. Verify it addresses each reviewer feedback point below. Verify it
+       stays within ${templatePath}'s section bounds. Check only these points. Do not re-audit
+       the rest of the artifact.\n--- reviewer feedback ---\n${feedback}\n--- end feedback ---`
+    );
+    return { result, critique };
+  }
+
+  let result = await agent(draftPrompt, { label, phase: ph, agentType, schema, ...draftOpts });
+  if (!result) return { result: null, critique: null }; // draft agent skipped/died — nothing written to critique
+  let critique = await critic(critiquePrompt); // the stage's one full template audit
+  for (let round = 0; round < 2 && critique && !critique.clean; round++) {
+    // Hand the current best questions forward so a round that fixes the artifact cannot rewrite
+    // the questions as a side effect; `result` is the drafter's on round 0, the prior reviser's after.
+    const revised = await revise(
+      `Resolve every issue below:\n${critique.issues.join("; ")}`,
+      result?.open_questions
+    );
+    if (revised) result = revised; // reviser skipped/died — keep the prior result rather than dropping it
+    critique = await critic(       // scoped re-check so the loop can actually terminate early
+      `Read ${artifactPath}. Verify each previously-raised issue below is now resolved. Check
+       only these issues. Do not open a fresh audit of the rest of the artifact.\n${critique.issues.join("; ")}`
+    );
+  }
+  return { result, critique };
+}
+
+// One-line critic verdict for stage logs.
+function verdictNote(critique) {
+  if (!critique) return "critic verdict unavailable";
+  return critique.clean ? "critic verdict clean" : `critic still flags ${critique.issues.length} issue(s)`;
+}
+
+// Guards shared by every stage. A missing slug would name no artifact; a missing date would make
+// a drafter invent one. Both are orchestrator bugs, so they fail the call before any agent runs.
+if (typeof slug !== "string" || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug)) {
+  log(`spec-pipeline: args.slug missing or not kebab-case (${JSON.stringify(slug)}). Nothing was run.`);
+  return { stage, error: "args.slug missing or not kebab-case" };
+}
+if (["triage", "scope", "spec"].includes(stage) && (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date))) {
+  log(`spec-pipeline: args.date missing or not YYYY-MM-DD for ${slug}. Nothing was run.`);
+  return { stage, error: "args.date missing or not YYYY-MM-DD" };
+}
+// Scope, spec, and implement run as the triage-chosen architect. An architect the config does not
+// know would run an unconfigured agent and make every later routing check meaningless.
+if (["scope", "spec", "implement"].includes(stage) && (!architect || !ARCHITECTS.includes(architect))) {
+  log(`spec-pipeline: args.architect ${JSON.stringify(architect)} is missing or not one of ${ARCHITECTS.join(", ")}. Recover it from the triage artifact's **Lane**: line. Nothing was run.`);
+  return { stage, error: "args.architect missing or not a configured lane architect" };
+}
+
+// --- Triage: classify the work and pick the architect lane ---
+// Conformed to <specs_dir>/triage-template.md.
+if (stage === "triage") {
+  phase("Triage");
+  if (!feedback && !(typeof idea === "string" && idea.trim())) {
+    log(`triage for ${slug}: no idea and no feedback - nothing to triage. Nothing was run.`);
+    return { stage: "triage", error: "args.idea is required for a triage compose round" };
+  }
+  // One lane's architect borrows the routing role: it drafts, revises, and critiques triage. It
+  // is config.triage_agent when set, else the first lane's architect. On a routed return, the
+  // validated `architect` value routes every later stage. On a blocked return no lane was chosen.
+  // Nothing downstream may run until a person resolves the block.
+  const triageAgent = c.triage_agent || c.lanes[0].architect;
+  const singleLane = c.lanes.length === 1
+    ? `\n     With one lane configured, the lane step is trivially "${c.lanes[0].name}"; still verify the
+     target region falls inside that lane's paths, and write ## AS's blocking form if it does not.`
+    : "";
+  const changeTypes = PREFIXES.length === 1
+    ? `${PREFIXES[0]} (the only configured change type; every workstream uses it)`
+    : `one of ${PREFIXES.join(", ")} (${PREFIXES[0]} for a new capability, ${PREFIXES[1]} for correcting existing behaviour${PREFIXES.length > 2 ? `; ${PREFIXES.slice(2).join(", ")} as the triage template defines` : ""})`;
+  const { result: triage, critique } = await refine(
+    triageAgent,
+    `AS. You are the routing analyst for the ${c.project.name} workstream "${slug}". ${c.project.description}
+
+     OBSERVE. Read the operator's raw idea between the markers below.
+
+     CONSIDERING. Use ${SPECS}/triage-template.md for the artifact's shape and per-section
+     rules. Use the lane table below as the routing table; ${c.steering.file}
+     \`${c.steering.routing_heading}\` is its human-readable counterpart. Use the checkout
+     you actually read: \`git rev-parse --abbrev-ref HEAD\` for the ref and
+     \`git rev-parse --short HEAD\` for the literal SHA. Treat the idea's own assertions as claims
+     to verify, not as facts to carry forward.
+
+     ORDER.
+     1. raw idea -> verified facts: check every claim the idea carries against the tree. Record
+        each one as surviving with path:line, falsified with the citation that falsifies it, or
+        non-resolving. Falsifying an input claim is a result, not a failure.
+     2. verified facts -> lane: one of ${LANE_NAMES.join(", ")}, per the lane table.
+     3. lane -> change type: ${changeTypes}.
+     4. change type -> target region: the subsystem and the specific files the work touches.
+     5. target region -> exclusions: what the work must not do. Give each one a falsifiable check.
+     6. exclusions -> residual decisions: give each one 2-4 enumerated options. Add a
+        recommendation where you have a lean.${singleLane}
+
+     VALIDATE. Set aside every assertion in the raw idea. The lane, the change type, and the files
+     the work touches must each still follow from a claim you verified. The artifact's own
+     ## VALIDATE names one frame a skeptical reader would apply. That frame must differ from the
+     role in ## AS and from "what does the tree show", which is the frame ## OBSERVE already used.
+
+     OUTPUT. Write ${SPECS}/${slug}-triage.md with the template's six sections and nothing after
+     ## OUTPUT. Delete all HTML comments. Frontmatter: Slug: ${slug}, Date: ${date}, and Source:
+     the issue link or note the idea names, or the literal \`hand-seeded\` when it names none.
+     Use the six ORDER links above as the fixed names of ## ORDER's spine, and add any further
+     dependency your reasoning carried. Return what is described after the idea.
+
+     --- raw idea ---
+     ${idea}
+     --- end raw idea ---
+
+     --- lane table ---
+${LANE_TABLE}
+     --- end lane table ---
+
+     If ## AS, ## OBSERVE, or ## CONSIDERING cannot be filled honestly, write that section's
+     blocking unfillable form. Do not invent a role or a lane to fill it. Examples: the idea is two
+     workstreams, the tree falsifies the premise, or the lane needs a human decision. If ## ORDER
+     as a whole or ## VALIDATE cannot be filled, write its non-blocking form. The template states
+     what each form forces on Status, Lane, Branch, and ## OUTPUT.
+     ${OQ_GUIDANCE}${TRIAGE_MIRROR}${TRIAGE_STATUS}`,
+    `AS. You are an adversarial critic.
+
+     OBSERVE. Read ${SPECS}/${slug}-triage.md.
+
+     CONSIDERING. Check the artifact against every bullet of ${SPECS}/triage-template.md's
+     Composition-Time Self-Check, the per-section rules in that template's comments, and the
+     lane table below (${c.steering.file} \`${c.steering.routing_heading}\` is its human-readable
+     counterpart). Treat a section's sanctioned unfillable form as
+     conformant when it names what cannot be decided and what would decide it, and agrees with the
+     frontmatter and its ## OUTPUT entry. Treat a Status: Blocked artifact's absent lane,
+     architect, and branch prefix, and its B entries, as the sanctioned outcome.
+
+     ORDER.
+     1. each self-check bullet -> the artifact line that satisfies or fails it.
+     2. failures -> issues. Each issue names the section and the unmet rule.
+
+     VALIDATE. Every issue must survive a re-read against the template's own words, not your
+     preference. A path shared by **While excluding** and **Adjacent systems** is legal. An extra
+     X -> Y link in ## ORDER is legal. A ## AS role that names no lane (an unlaned agent, or
+     manual) is not a routed outcome, and belongs in that section's blocking form.
+
+     OUTPUT. Return clean and issues.
+
+     --- lane table ---
+${LANE_TABLE}
+     --- end lane table ---`,
+    // `status` is the discriminator. The two branches carry disjoint field sets.
+    // A top-level `oneOf` once expressed that split, and the API rejects it outright:
+    // `400 tools.N.custom.input_schema: input_schema does not support oneOf, allOf, or anyOf at the
+    // top level`. That is a hard tool-registration failure. The agent never starts, and the stage
+    // reports "draft agent returned no result" with nothing written to disk. Do not reintroduce
+    // oneOf/allOf/anyOf at the top level of any schema in this file.
+    // The contract now lives in `description` strings, which reach the model and are schema-legal.
+    // The flat `required` list holds only the fields both branches owe. Descriptions are advisory,
+    // so the fail-closed guard below is what keeps the shapes apart. A `routed` return missing a
+    // routing field is caught there and reported as malformed. "malformed" is not in the enum on
+    // purpose. An agent may not claim it. It is the verdict the body reaches when a `routed` return
+    // fails its own contract.
+    // The lane, architect, dev, and branch_prefix enums are built from the config at runtime, so
+    // the schema rejects a lane or agent the project never configured and the agent retries.
+    {
+      type: "object",
+      required: ["status", "triage_path", "open_questions"],
+      properties: {
+        status: {
+          enum: ["routed", "blocked"],
+          description:
+            "The discriminator. The two branches carry disjoint field sets. " +
+            "routed requires lane, architect, dev, and branch_prefix. " +
+            "routed forbids blocked_on and blocked_reason. " +
+            "blocked requires blocked_on and blocked_reason. " +
+            "blocked forbids lane, architect, dev, and branch_prefix, because no lane was chosen. " +
+            "Never fill a field of the branch you did not take."
+        },
+        lane:           { enum: LANE_NAMES, description: "routed only. Required there." },
+        architect:      { enum: ARCHITECTS, description: "routed only. Required there. Must be the lane's architect." },
+        dev:            { enum: DEVS, description: "routed only. Required there. Must be the lane's dev." },
+        branch_prefix:  { enum: PREFIXES, description: "routed only. Required there." },
+        blocked_on:     { enum: ["AS", "OBSERVE", "CONSIDERING"], description: "blocked only. Required there. The section whose unfillable form you wrote." },
+        blocked_reason: { type: "string", description: "blocked only. Required there. What cannot be decided, and what would decide it." },
+        triage_path:    { type: "string" },
+        open_questions: OQ
+      }
+    },
+    "triage", "Triage", `${SPECS}/${slug}-triage.md`, `${SPECS}/triage-template.md`,
+    // Triage routes and classifies against a fixed table. It hands anything it cannot decide to
+    // the human as an Open or Blocking entry. So it drafts on the triage tier
+    // (config.models.triage). The top tier is reserved for the spec stage by default.
+    { draftModel: M.triage, feedback, stageInstructions: TRIAGE_REVISER_CONTRACT }
+  );
+  if (!triage) {
+    log(`triage draft agent returned no result for ${slug} — nothing written.`);
+    return { stage: "triage", error: "draft agent returned no result" };
+  }
+  // Declining to route is a normal triage outcome, not an error. The artifact records the block
+  // in its own frontmatter and B entries. The return only reports it. The count below reads
+  // "decision(s), at least one blocking" because open_questions copies ordinary **Open** entries
+  // as well as B entries, and a blocked triage may raise both.
+  if (triage.status === "blocked") {
+    const on  = triage.blocked_on     || "AS";
+    const why = triage.blocked_reason || "blocked without a stated reason";
+    log(`triage blocked for ${slug} on ## ${on}: ${why}. Artifact written to ${triage.triage_path} with Status: Blocked. The artifact's own **Status**: line is authoritative. The orchestrator re-reads it before acting. ${(triage.open_questions || []).length} decision(s) for review, at least one blocking (B entries begin "Blocking - "). ${verdictNote(critique)}. No lane, architect, or branch prefix was chosen. The scope stage must not run for this slug until the block is resolved.`);
+    return { stage: "triage", triage, critique };
+  }
+  // Fail closed, but not into the blocking-question channel. A `routed` return missing a routing
+  // field is a schema failure. No answer a developer could give would fix it. The B channel is
+  // reserved for problems in the idea itself that a human can decide. Reporting this as a block
+  // would also disagree with the artifact, which still reads Status: Draft with a real Lane and
+  // Branch.
+  // The same holds for a routed return whose architect or dev is not the chosen lane's own. Each
+  // field passed its enum on its own, but the combination routes later stages to the wrong lane.
+  // The check compares against the lane's row rather than mapping the agent back to a lane,
+  // because one agent type may serve several lanes (e.g. general-purpose everywhere).
+  const missing = ["lane", "architect", "dev", "branch_prefix"].filter(k => !triage[k]);
+  const row = c.lanes.find(l => l.name === triage.lane);
+  const mismatch = !missing.length && (!row || row.architect !== triage.architect || row.dev !== triage.dev);
+  if (missing.length || mismatch) {
+    const what = missing.length
+      ? `status=routed but missing ${missing.join(", ")}`
+      : `architect/dev do not match lane "${triage.lane}" (got architect=${triage.architect}, dev=${triage.dev}; the lane table says architect=${row ? row.architect : "?"}, dev=${row ? row.dev : "?"})`;
+    const err = `malformed triage return: ${what}. The artifact at ${triage.triage_path} is authoritative - recover routing from its **Lane**: and **Branch**: lines (command doc Step 3), or re-run the stage. This is a drafter failure, not a triage decision, and carries no question for the developer.`;
+    log(`triage malformed for ${slug}: ${err} ${verdictNote(critique)}.`);
+    return { stage: "triage", error: err, triage: { ...triage, status: "malformed" }, critique };
+  }
+  log(`triage done for ${slug}: lane=${triage.lane}, architect=${triage.architect}, branch=${triage.branch_prefix}/${slug}, ${triage.open_questions.length} open question(s) for review; ${verdictNote(critique)}.`);
+  return { stage: "triage", triage, critique };
+}
+
+// --- Scope: goals / non-goals / files-affected, by the chosen architect ---
+// Conformed to <specs_dir>/scope-template.md.
+if (stage === "scope") {
+  phase("Scope");
+  const { result: scope, critique } = await refine(
+    architect, // carried forward from the triage return value
+    `AS. ${roleOf(architect)}
+
+     OBSERVE. Read ${SPECS}/${slug}-triage.md as the refined idea. Use its ## OBSERVE verified
+     facts. Use its ## CONSIDERING bullets. Use the hand-off sentence and every **Decided** entry
+     of its ## OUTPUT. Its ## ORDER records how triage reasoned. It is not a plan for you.
+
+     CONSIDERING. Use ${SPECS}/scope-template.md as the artifact's shape and per-section rules.
+     Use the \`${c.rules_dir}/*.md\` files whose globs overlap the likely files-affected set, if
+     that directory exists. Use the working tree.
+
+     ORDER.
+     1. Triage -> an executive summary. It names the causal mechanism as a relation between two
+        named surfaces.
+     2. Mechanism -> goals. Write one goal per distinct verifiable outcome on ${SURFACE}. Run
+        every grep, count, or enumeration a goal cites. Name the check in a few words
+        and state its observed number. Keep the full recipe (command pipelines, fixture wiring,
+        assertion text) out of the goal; it belongs in the spec's Acceptance Criteria.
+     3. Goals -> non-goals. Each non-goal names something a spec author could reach for from these
+        goals. Each non-goal states its reason.
+     4. Scope -> the files-affected map. Sweep it with grep -rn for copies and call sites of what
+        changes.
+     5. Files -> dependencies by direction.
+     6. Dependencies -> open questions, or the explicit no-questions sentence.
+     7. The draft -> the template's Composition-Time Self-Check. Do Part A by reading what you
+        wrote. Do Part B by running it against the tree.
+
+     VALIDATE the artifact must hold when reframed as "the spec author reads only this file" -
+     every goal still adjudicable, every non-goal still naming a surface those goals reach,
+     every path still resolving - with no recourse to the triage,
+     OUTPUT ${SPECS}/${slug}-scope.md with Slug: ${slug}, Date: ${date}, Status: Draft, its
+     six H2 sections in template order, no HTML comments, and nothing after ## Open Questions.
+     ${OQ_GUIDANCE}${SCOPE_MIRROR}`,
+    `AS an adversarial critic, OBSERVE ${SPECS}/${slug}-scope.md, CONSIDERING Part A of
+     ${SPECS}/scope-template.md's Composition-Time Self-Check and the per-section rules in that
+     template's comments, by ORDER (1) each Part A bullet -> the artifact line that satisfies or
+     fails it, weighting the five drafters most often miss: every ## Files Affected reference
+     contains a "/" (a bare filename is not a path); a **Not yet enumerated** line is present; each
+     non-goal names something reachable from THIS scope's goals rather than an invariant the repo
+     merely holds; ## Dependencies names neither ${SPECS}/${slug}.md, ${SPECS}/${slug}-triage.md,
+     nor this slug's branch in either direction; every ## Open Questions entry is in exactly one of
+     the two entry shapes, numbering unbroken, no seventh H2, the no-questions sentence only when
+     the section has no entries; (2) failures -> issues, each naming the section and the unmet
+     rule, VALIDATE every issue must name the template rule it rests on, OUTPUT clean and issues.`,
+    {
+      type: "object",
+      required: ["scope_path", "open_questions"],
+      properties: { scope_path: { type: "string" }, open_questions: OQ }
+    },
+    "scope", "Scope", `${SPECS}/${slug}-scope.md`, `${SPECS}/scope-template.md`,
+    // Scope restates the triage's verified idea as goals, non-goals, and a files-affected map,
+    // each checked against the tree. It runs on the scope tier (config.models.scope). The top
+    // tier is reserved for the spec stage by default, whose defects are the expensive ones.
+    { draftModel: M.scope, feedback, stageInstructions: SCOPE_REVISER_CONTRACT }
+  );
+  if (!scope) {
+    log(`scope draft agent returned no result for ${slug} — nothing written.`);
+    return { stage: "scope", error: "draft agent returned no result" };
+  }
+  log(`scope done for ${slug}: ${scope.open_questions.length} open question(s) for review; ${verdictNote(critique)}.`);
+  return { stage: "scope", scope, critique };
+}
+
+// --- Spec: draft <specs_dir>/<slug>.md against the template ---
+// Conformed to <specs_dir>/spec-template.md.
+if (stage === "spec") {
+  phase("Spec");
+  const { result: spec, critique } = await refine(
+    architect,
+    `AS. ${roleOf(architect)}
+
+     OBSERVE. Read ${SPECS}/${slug}-scope.md as the commitments this spec elaborates. Its
+     ## Goals and ## Non-Goals bind. Read ${SPECS}/${slug}-triage.md as the spec's verified
+     facts.
+
+     CONSIDERING. Use ${SPECS}/spec-template.md as the artifact's shape and per-section rules.
+     The template also says who reads each phase block. The dev agent gets #### Scope inlined as
+     its boundary. The criteria checker gets #### Acceptance Criteria alone. The checker's
+     verdict halts every later phase. ${openRules("the scope's ## Files Affected or any file your design adds")}
+     Use the working tree.
+
+     ORDER.
+     1. Scope -> the problem statement and the files and behaviour the work touches.
+     2. Those files and behaviour -> goals. Write one goal per committed outcome. Keep the goals
+        faithful to the scope's ## Goals.
+     3. Goals -> non-goals and boundaries. Keep them faithful to the scope's ## Non-Goals.
+     4. Scope -> Current State. Anchor it at path and symbol.
+     5. Anchors -> Proposed Design. State the core principle first. Put the elements in
+        dependency order.
+     6. Design -> ## Invariance. Give one independent reframing. State the claim that survives
+        it. Name one concrete falsifier on ${SURFACE}.
+     7. Design -> the phased ## Implementation Plan. Each phase's Agent routing line carries exactly
+        one bare agent name from this list: ${ROUTABLE.join(", ")}. Each phase lists Scope IN and
+        OUT as enumerated paths. Each phase has co-located Tests. Each phase's Acceptance Criteria
+        are adjudicable from their own text plus the tree. Every test run in them is a targeted
+        selection. The full check recipe for each goal the phase delivers (the command pipeline,
+        the fixture wiring, the assertion) lands here, not in ### Goals.
+     8. The draft -> the template's Composition-Time Self-Check. Do Part A by reading what you
+        wrote. Do Part B by running it against the tree.
+
+     VALIDATE. Each phase must hold for its narrowest reader. The criteria block must hold with
+     the rest of the spec covered. The Scope block must hold as the dev agent's only boundary.
+     The whole spec must hold when asked "what did the scope authorize?". No goal may be widened
+     or narrowed silently.
+
+     OUTPUT. Write ${SPECS}/${slug}.md with Date: ${date} and Status: Draft. Put the sections
+     in template order. Delete all HTML comments. Make ## Open Questions the last section, in one
+     of its three shapes.
+     ${OQ_GUIDANCE}${SPEC_MIRROR}`,
+    `AS. You are an adversarial critic.
+
+     OBSERVE. Read ${SPECS}/${slug}.md.
+
+     CONSIDERING. Use Part A of the Composition-Time Self-Check in ${SPECS}/spec-template.md.
+     Use the rules in each phase block's comments. ${openRules("any phase's Scope IN")}
+
+     ORDER.
+     1. Each Part A bullet -> the artifact line that satisfies or fails it.
+     1b. The Proposed Design and each phase -> conformance to every rule file you opened.
+     2. Every Agent routing line -> exactly one bare agent name from this list:
+        ${ROUTABLE.join(", ")}. The line has no parenthetical. It has no trailing clause. It
+        names no second agent. It does not say "manual".
+     3. Every Acceptance Criteria block -> adjudicable from its own text plus the tree. Every
+        test run it names is a targeted selection. It never names ${WHOLE_SUITE.join("; ")}; or
+        any invocation that collects a whole suite. The whole suite belongs to the
+        validate stage. Every constraint on how a file changed is stated by content, not by
+        \`git diff\` against HEAD. That diff judges every phase since the last commit. Two diff
+        shapes are sound. The first is an empty \`git diff <path>\` for a path no phase may
+        touch. The second is \`git diff --name-only <commit>..HEAD\`, which names its baseline.
+     4. Failures -> issues. Each issue names the section and the unmet rule.
+
+     VALIDATE. Every issue must name the template rule or ${c.rules_dir}/ file it rests on.
+
+     OUTPUT. Return clean and issues.`,
+    // The spec return deliberately carries no phases array: the implement stage's `phases` are
+    // always reconstructed by the orchestrator from the on-disk spec's "**Agent routing**:" lines,
+    // so a return value that could diverge from the file has nothing to feed.
+    {
+      type: "object",
+      required: ["spec_path", "open_questions"],
+      properties: {
+        spec_path: { type: "string" },
+        open_questions: OQ
+      }
+    },
+    "spec", "Spec", `${SPECS}/${slug}.md`, `${SPECS}/spec-template.md`,
+    // The spec is the single source of truth for implement. Its phases, routing lines, and
+    // acceptance criteria decide whether each later dev phase succeeds or halts. The drafter and
+    // the reviser share draftModel, so both run on the spec tier (config.models.spec, the top
+    // tier by default). By default these are the pipeline's only top-tier calls and its most
+    // valuable model spend. A subtle spec defect costs far more in failed implement phases than
+    // the draft-time premium.
+    { draftModel: M.spec, feedback, stageInstructions: SPEC_REVISER_CONTRACT }
+  );
+  if (!spec) {
+    log(`spec draft agent returned no result for ${slug} — nothing written.`);
+    return { stage: "spec", error: "draft agent returned no result" };
+  }
+  log(`spec drafted for ${slug} at ${spec.spec_path}: ${spec.open_questions.length} open question(s) for review; ${verdictNote(critique)}.`);
+  return { stage: "spec", spec, critique };
+}
+
+// --- Implement: each spec phase, routed (impl tier), criteria-checked (check tier), reviewed (architect on the review tier), in sequence ---
+// Verify is split into two calls: a criteria check and an architect review.
+if (stage === "implement") {
+  phase("Implement");
+  // Guards first. `phases` is rebuilt by the orchestrator from the on-disk spec; a missing or
+  // malformed entry means that reconstruction failed, and an agent the config does not list would
+  // run an unconfigured agentType. Either way nothing should touch the tree.
+  if (!Array.isArray(phases) || phases.length === 0) {
+    log(`implement for ${slug}: args.phases missing or empty. Rebuild it from ${SPECS}/${slug}.md. Nothing was run.`);
+    return { stage: "implement", error: "args.phases missing or empty" };
+  }
+  for (const [i, p] of phases.entries()) {
+    const bad = !isObj(p)
+      ? "is not an object"
+      : ["title", "agent", "scope", "acceptance"].filter(k => typeof p[k] !== "string" || !p[k].trim()).map(k => `has no ${k}`).join(", ");
+    if (bad) {
+      log(`implement for ${slug}: phases[${i}] ${bad}. Nothing was run.`);
+      return { stage: "implement", error: `phases[${i}] ${bad}` };
+    }
+    if (!ROUTABLE.includes(p.agent)) {
+      log(`implement for ${slug}: phase "${p.title}" routes to "${p.agent}", which is not one of ${ROUTABLE.join(", ")}. Nothing was run.`);
+      return { stage: "implement", error: `phase "${p.title}" routes to unconfigured agent "${p.agent}"` };
+    }
+  }
+  // All phases share one working tree on one branch. There is no worktree isolation, by design.
+  // Spec phases are dependency-ordered. So they run one at a time in a for...of loop, not in
+  // pipeline(). At most one dev agent writes the tree at a time. Each phase's verify reads a
+  // settled tree.
+  //
+  // Because phases are dependency-ordered, a failed phase breaks every phase after it. The loop
+  // halts at the first phase whose criteria check fails, whose architect review is unsound, or
+  // whose agents die. It records the failure and returns `halted` naming that phase. The human
+  // then decides whether to refine or repair before any later phase spends tokens on a broken tree.
+  const results = [];
+  let halted = null;
+  const GENERIC_GUARD = "a source-shape guard that mechanizes an invariant no runtime test can observe";
+  const guardKinds = c.protected_guards.some(g => g.startsWith(GENERIC_GUARD))
+    ? c.protected_guards
+    : [...c.protected_guards, GENERIC_GUARD];
+  const invariantsClause = c.invariants.length
+    ? `Use the load-bearing invariants, each a heading under ${c.steering.file} -> ${c.steering.invariants_heading}: ${c.invariants.join("; ")}.`
+    : `Use the load-bearing invariants named in ${c.steering.file} (none are configured; judge against the spec's own ## Invariance section).`;
+  // Tests a change still owes even under "no test for a move or rename". Omitted when none are configured.
+  const exceptionsClause = c.mandatory_tests.length
+    ? ` Exceptions apply. ${c.mandatory_tests.map(t => `When ${t.when}, the change still owes ${t.requires}${t.rule ? ` (defined in ${t.rule}; open it with the Read tool, it is path-scoped and does not load on its own)` : ""}.`).join(" ")}`
+    : "";
+  for (const p of phases) { // reconstructed from <specs_dir>/<slug>.md's Agent routing lines; on re-entry, the not-yet-passed suffix
+    // An agent is reviewed by its own lane's architect. An unlaned agent (a docs phase) is
+    // reviewed by the workstream's architect. This replaces a two-way mapping that silently sent
+    // every non-dev phase to one lane.
+    const verifyArchitect = laneOf(p.agent)?.architect || architect;
+
+    // (a) Implement the phase with the dev agent named on the spec's Agent routing line.
+    // The return value is checked for null (agent skipped or died) and otherwise discarded.
+    // The verify agents read the tree itself, not the implementer's account of it.
+    // This runs on the impl tier. The top-tier spec already fixed the phase's scope and acceptance
+    // criteria. A weak implementation costs one halted phase, because the criteria checker and
+    // the architect review below both gate it. `implModel` raises the tier when a halted phase
+    // is resent.
+    const impl = await agent(
+      `AS. ${roleOf(p.agent)}
+
+       OBSERVE. Read ${SPECS}/${slug}.md. The work to implement is the phase titled
+       "${p.title}", with the scope below.
+
+       CONSIDERING. Use the \`${c.rules_dir}/*.md\` whose globs intersect this phase's
+       files-affected set, if that directory exists. Do not touch any file outside the phase's
+       scope. Do not create, switch, or rename branches. Do not use git worktrees. Do not use git
+       stash. Do not run the whole test suite. Work on the current branch exactly as it is
+       checked out.
+
+       ORDER.
+       1. The phase's declared prerequisites -> a go or no-go decision before any write.
+       2. Go -> the phase's steps, executed in dependency order.
+       3. Each behaviour this phase's \`#### Scope\` **IN** commits to -> one test that fails if
+          this phase's change is reverted. Land it alongside the change. A mutation that an
+          existing test already pins gets no new test. A mutation that changes no observable
+          behaviour (a move, a rename, a re-home, a comment) gets no new test.${exceptionsClause}
+       4. Produced artifacts -> post-condition checks.
+
+       VALIDATE. Every change must stay within the phase's declared scope. Re-read the phase's
+       Acceptance Criteria against the spec, not against the diff you just wrote. The result must
+       satisfy them.
+
+       OUTPUT. Apply the edits to the current branch. Return a summary that names each file
+       touched and the acceptance criterion it serves. Name every mutation you landed with no new
+       test, together with the existing test that pins its behaviour.
+       \n${SCOPED_TESTS} Where a criterion you are working toward names a whole-suite run, satisfy
+       it with the narrowest selection covering the files you touched. Leave the global claim to
+       validate.\n--- phase scope ---\n${p.scope}\n--- end phase scope ---`,
+      { label: `impl:${p.title}`, phase: "Implement", agentType: p.agent, model: implModel || model || M.impl }
+    );
+    if (impl === null || impl === undefined) {
+      halted = p.title;
+      // sound: null - the review never ran. Same convention as a failed criteria check below.
+      results.push({ phase: p.title, passed: false, sound: null, criteria: null, review: null, error: "implementation agent returned no result" });
+      log(`implement halted at phase "${p.title}": implementation agent returned no result.`);
+      break;
+    }
+
+    // (b) Verify is two complementary calls. First, an agent on the check tier runs the named
+    // tests, reads the named files, and reports observable pass or fail per acceptance criterion.
+    // This check rests on evidence. Its verdict does not depend on the judgment or blind spots of
+    // whoever wrote the code.
+    const criteria = await agent(
+      `Check each acceptance criterion below for phase "${p.title}" of ${SPECS}/${slug}.md.
+       For each criterion, run the named tests. Read the named files. Set
+       met=true only when a run result or a file read observably satisfies the criterion. Do not
+       assume. Verify. Report pass or fail per criterion.
+       \n${SCOPED_TESTS}
+       \nWhen a criterion names a whole-suite run, do not run it. Substitute the narrowest
+       selection that covers the files this phase touched plus their co-located tests. Judge the
+       criterion on that evidence. Set deferred=true on it. The global no-regression claim is the
+       validate stage's to confirm. Set deferred=false on every other criterion. deferred records
+       that a criterion's global reach went unverified here. It never excuses a failure you did
+       observe. A substituted run that failed is met=false.\n--- acceptance criteria ---\n${p.acceptance}\n--- end acceptance criteria ---`,
+      {
+        label: `verify:checks:${p.title}`, phase: "Implement", model: M.check,
+        schema: {
+          type: "object", required: ["passed", "criteria"],
+          properties: {
+            passed: { type: "boolean" },
+            criteria: {
+              type: "array",
+              items: {
+                type: "object", required: ["criterion", "met", "deferred"],
+                properties: {
+                  criterion: { type: "string" },
+                  met:       { type: "boolean" },
+                  deferred:  { type: "boolean" }
+                }
+              }
+            }
+          }
+        }
+      }
+    );
+
+    // A failed criteria check halts the phase whatever the review would say. The developer
+    // re-runs this phase after repairing it, and that re-runs the review against the repaired
+    // tree. An architect-tier call on a tree already known to halt would only critique code that
+    // is about to change. A null result (agent skipped or died) is an unknown verdict and is
+    // treated as failure.
+    // A self-reported `passed` is not trusted over its own rows: the phase passes only when the
+    // checker said so AND reported at least one criterion AND every row it reported is met. A
+    // checker that says passed=true beside an unmet row fails closed.
+    const rows = criteria && Array.isArray(criteria.criteria) ? criteria.criteria : null;
+    const passed = !!(criteria && criteria.passed && rows && rows.length > 0 && rows.every(x => x && x.met));
+    if (!passed) {
+      halted = p.title;
+      // sound: null means the review never ran. sound: false means it ran and found the phase
+      // unsound. Both are falsy, so Step 3's re-entry slicing still re-sends this phase.
+      results.push({
+        phase: p.title, passed: false, sound: null,
+        criteria: rows, review: null
+      });
+      const why = !criteria
+        ? "criteria checker returned no result"
+        : criteria.passed
+          ? "criteria checker claimed passed but its own rows are empty or include an unmet criterion (failed closed)"
+          : "acceptance criteria not met";
+      log(`implement halted at phase "${p.title}": ${why}; architect review and later phases not run.`);
+      break;
+    }
+
+    // (c) The same-lane architect gives a qualitative review that tests cannot settle: design fit,
+    // constraint adherence, simplicity. It runs only when (b) passed, on the review tier: the
+    // review checks the tree against a spec the top tier already wrote, and `model` is the only
+    // way to raise it.
+    const review = await agent(
+      `AS. ${roleOf(verifyArchitect)}
+
+       OBSERVE. Review the "${p.title}" implementation just produced on the current branch.
+
+       CONSIDERING. Use ${SPECS}/${slug}.md. ${openRules("the files this phase changed")}
+       ${invariantsClause} The mechanical acceptance-criterion checks have already run
+       elsewhere. Do not repeat them.
+
+       ORDER.
+       1. Implementation -> design fit against the spec's intent.
+       2. Design fit -> adherence to each load-bearing invariant.
+       3. Adherence -> simplicity. Ask whether the change does only what the phase intends.
+       3b. Simplicity -> test proportionality. For each test this phase landed, ask whether it
+           fails when a behaviour is wrong or only when the code is shaped differently. Two
+           anti-patterns define the failure: "Tests a wrong program passes too" (asserting a
+           symbol exists, lives in a file, or equals its own literal instead of calling it and
+           asserting what it returns) and "Source-shape assertions with no named invariant"
+           (reading source text where a runtime test could observe the behaviour). See
+           ${c.steering.file} -> ${c.steering.anti_patterns_heading} where present. Ask whether
+           any two of them fail for the same reason. For each shape-only test, name the existing
+           test that already covers the behaviour it gestures at. Draw that test only from this
+           phase's files and their co-located tests. If no behaviour is at stake, say so. These
+           guard kinds are never findings: ${guardKinds.join("; ")}. Every 3b finding is an
+           "observation". A 3b finding is never on its own a blocking concern.
+       4. The above -> concerns worth raising.
+
+       VALIDATE. Each concern must stand even if every test passes. Anchor each concern to a named
+       spec section or a named rule. For a 3b finding, anchor it to the landed test file together
+       with the existing test that covers its behaviour. Never anchor a concern to a coverage
+       percentage or a style preference. Mark a concern "blocking" when the phase does not satisfy
+       its intent. That means a load-bearing invariant is violated, or the design diverges from
+       the spec, or an acceptance criterion is met only nominally. Met only nominally means the
+       named test passes but the property it exists to check does not hold. Mark a concern
+       "observation" when it is true and worth recording but does not by itself mean the phase
+       should halt. That covers an adjacent defect, follow-up work, documentation or wording
+       drift, or a pre-existing issue this phase surfaced without causing. Set sound=false if and
+       only if at least one concern is blocking.
+
+       OUTPUT. Return a soundness verdict and the list of concerns. Each concern carries its
+       severity. Each concern carries an "anchor" naming the spec section or invariant it
+       implicates. For a test-proportionality finding, the anchor names the landed test file. A
+       concern you cannot anchor is a style preference. Drop it rather than raise it.`,
+      {
+        label: `verify:review:${p.title}`, phase: "Implement", agentType: verifyArchitect, model: model || M.review,
+        schema: {
+          type: "object", required: ["sound", "concerns"],
+          properties: {
+            sound: { type: "boolean" },
+            concerns: {
+              type: "array",
+              items: {
+                type: "object", required: ["severity", "concern", "anchor"],
+                properties: {
+                  severity: { enum: ["blocking", "observation"] },
+                  concern:  { type: "string" },
+                  anchor:   { type: "string" }
+                }
+              }
+            }
+          }
+        }
+      }
+    );
+
+    // A skipped or dead reviewer is an unknown verdict and is treated as failure. A review that
+    // lists a blocking concern halts even if it set sound=true. A self-contradicting review fails
+    // closed.
+    const concerns = review && Array.isArray(review.concerns) ? review.concerns : [];
+    const blocking = concerns.filter(x => x && x.severity === "blocking");
+    const sound = !!(review && review.sound) && blocking.length === 0;
+    results.push({ phase: p.title, passed: true, sound, criteria: rows, review });
+    if (!sound) {
+      halted = p.title;
+      log(`implement halted at phase "${p.title}": ${review ? `architect review unsound (${blocking.length} blocking concern(s)${review.sound ? "; the review said sound=true beside a blocking concern, failed closed" : ""})` : "architect reviewer returned no result"}; later phases not run.`);
+      break;
+    }
+  }
+  // Deferred criteria are the whole-suite claims the checker replaced with a scoped run. They are
+  // exactly the debt the validate stage settles. So the count goes in the stage's summary, not
+  // only in the per-phase detail the orchestrator may not unpack.
+  const deferredCount = results.reduce(
+    (n, r) => n + (r.criteria || []).filter(x => x && x.deferred).length, 0
+  );
+  if (!halted) log(`implement done for ${slug}: ${results.length} phase(s) implemented, criteria-checked, and reviewed${deferredCount ? `; ${deferredCount} whole-suite criterion/criteria deferred to validate` : ""}.`);
+  return { stage: "implement", results, halted };
+}
+
+// --- Validate: full-suite regression gate between implement and ship ---
+// The implement stage's checker runs only the tests each acceptance criterion names, so it
+// cannot see regressions outside those tests. This stage closes that gap before any
+// commit/push/PR: one agent on the cheap validate tier runs every configured full suite and
+// reports what it observed. It only reports and fixes nothing. The human decides what a failure
+// means (rewind to implement, refine, or fix directly). Re-running is idempotent, so the
+// orchestrator may validate again freely after /resume or after any further code change.
+if (stage === "validate") {
+  phase("Validate");
+  // A suite longer than the Bash tool's 10-minute foreground cap must run in the background with
+  // its own timeout (the tool's hard cap is 30 minutes, which validateConfig enforces).
+  const suiteLines = c.suites.map((s, i) =>
+    `(${i + 1}) ${s.name}: cwd ${s.cwd}${s.setup ? `; first run \`${s.setup}\` in the same shell` : ""}; command \`${s.command}\`; timeout ${s.timeout_ms} ms${s.timeout_ms > 600000
+      ? ` - longer than the Bash tool's 10-minute foreground cap, so run it with run_in_background: true and timeout: ${s.timeout_ms}, wait for its completion notification, then read its output; do not poll it with short checks`
+      : `; run it in the foreground with timeout: ${s.timeout_ms}`}.${s.notes ? ` ${s.notes}` : ""}`
+  ).join("\n");
+  const validation = await agent(
+    `Run every configured full test suite of ${c.project.name} and report observable results.
+     This stage is the only whole-suite run in the pipeline. The implement stage's phases run
+     scoped selections and defer their global no-regression claims to you. Run every suite in
+     full here even if every implement phase passed. A suite its timeout stops is a failure.
+     Suites (run each one exactly as written from its cwd, relative to the repo root; add no
+     flags of your own):
+${suiteLines}
+     For each suite, report pass/fail, with "suite" set to the suite's name exactly as written
+     above, and one entry per suite. Report the exact pass/fail counts from the runner's own
+     summary line. For every failing test, report its identifier plus a one-line failure reason.
+     Set passed=true only if every suite ran to completion with zero failures. A suite that
+     errored before completing is a failure, not a skip. Do not fix, edit, or re-run flaky
+     tests to green. This is a report-only gate.`,
+    {
+      label: "validate:full-suite", phase: "Validate", model: M.validate,
+      schema: {
+        type: "object", required: ["passed", "suites"],
+        properties: {
+          passed: { type: "boolean" },
+          suites: {
+            type: "array",
+            items: {
+              type: "object", required: ["suite", "passed", "summary"],
+              properties: {
+                suite:    { type: "string" },
+                passed:   { type: "boolean" },
+                summary:  { type: "string" },
+                failures: { type: "array", items: { type: "string" } }
+              }
+            }
+          }
+        }
+      }
+    }
+  );
+  if (!validation) {
+    log(`validate agent returned no result for ${slug}. Treat it as not validated.`);
+    return { stage: "validate", error: "validate agent returned no result" };
+  }
+  // Fail closed. The agent's own `passed` counts only when every configured suite has a reported
+  // entry that passed. A suite the agent skipped, renamed past recognition, or forgot is not a
+  // pass. An agent that said passed=true over a failing or missing suite is overruled.
+  const reported = Array.isArray(validation.suites) ? validation.suites : [];
+  const norm = (x) => String(x || "").trim().toLowerCase();
+  const unconfirmed = c.suites
+    .filter(s => !reported.some(r => r && norm(r.suite) === norm(s.name) && r.passed))
+    .map(s => s.name);
+  const passed = !!validation.passed && reported.every(r => r && r.passed) && unconfirmed.length === 0;
+  if (validation.passed && !passed) {
+    log(`validate for ${slug}: the agent reported passed=true, overruled (failed closed) because ${unconfirmed.length ? `no passing report for suite(s) ${unconfirmed.join(", ")}` : "a reported suite failed"}.`);
+  }
+  log(`validate done for ${slug}: ${passed ? "all suites green — ready to ship" : "FAILURES — do not ship"} (${reported.map(s => `${s.suite}: ${s.passed ? "pass" : "FAIL"}`).join(", ")}${unconfirmed.length ? `; unconfirmed: ${unconfirmed.join(", ")}` : ""}).`);
+  return { stage: "validate", validation: { ...validation, suites: reported, passed } };
+}
+
+// Unknown stage: surface the contract rather than silently doing nothing.
+log(`spec-pipeline: unknown stage "${stage}" — expected one of triage | scope | spec | implement | validate.`);
+return { stage, error: `unknown stage "${stage}"` };

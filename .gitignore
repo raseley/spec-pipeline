@@ -1,0 +1,16 @@
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# Tooling output
+node_modules/
+*.log
+
+# NOTE: payload/.claude and docs/specs are shipped content. Never ignore them.
+
+# Private term list for scripts/check-contracts.sh (never commit it)
+.banned-terms

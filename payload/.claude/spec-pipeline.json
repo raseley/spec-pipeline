@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "project": {
+    "name": "Orderly",
+    "description": "An order-management web app: a Python API that owns orders, refunds, and tenants, and a TypeScript web client that renders them."
+  },
+  "specs_dir": "docs/specs",
+  "agents_dir": ".claude/agents",
+  "rules_dir": ".claude/rules",
+  "steering": {
+    "file": "CLAUDE.md",
+    "routing_heading": "### Agent Selection",
+    "invariants_heading": "## Critical Constraints",
+    "anti_patterns_heading": "### LLM-Behavior Corrections",
+    "reference_heading": "## Reference"
+  },
+  "git": { "base_branch": "main", "remote": "origin", "branch_prefixes": ["feat", "fix"] },
+  "ship": { "forge": "github", "remove_artifacts_after_pr": true },
+  "triage_agent": "api-architect",
+  "lanes": [
+    {
+      "name": "api",
+      "description": "Python/FastAPI service under api/: routes, domain models, migrations, background jobs.",
+      "architect": "api-architect",
+      "dev": "api-dev",
+      "other_agents": [],
+      "paths": ["api/**"],
+      "targeted_tests": "pytest <file or node id> -q from the repo root, e.g. pytest api/tests/unit/test_refunds.py -q",
+      "narrow_dirs": ["api/tests/contract/"]
+    },
+    {
+      "name": "web",
+      "description": "TypeScript/React client under web/: components, hooks, API client, Vitest tests.",
+      "architect": "web-architect",
+      "dev": "web-dev",
+      "other_agents": [],
+      "paths": ["web/**"],
+      "targeted_tests": "npx vitest run <path> from web/, e.g. npx vitest run tests/orders/OrderTable.test.tsx",
+      "narrow_dirs": []
+    }
+  ],
+  "unlaned_agents": ["docs-writer"],
+  "suites": [
+    {
+      "name": "api",
+      "lane": "api",
+      "setup": "",
+      "command": "pytest api/tests/ -q",
+      "cwd": ".",
+      "timeout_ms": 900000,
+      "notes": "api/tests/perf/ skips itself unless targeted explicitly (enforced by the api test configuration). Do not add an exclusion flag of your own. Do not run the benchmarks."
+    },
+    {
+      "name": "web",
+      "lane": "web",
+      "setup": "",
+      "command": "npx vitest run",
+      "cwd": "web",
+      "timeout_ms": 300000,
+      "notes": ""
+    }
+  ],
+  "whole_suite_patterns": ["a bare `pytest` from the repo root", "`npm test`, `npm run test`, or `npx vitest run` with no path"],
+  "invariants": ["Money as Integer Cents", "Tenant Scoping", "Background Job Payloads", "Migrations Are Additive"],
+  "protected_guards": [
+    "the job-payload isolation contract test (api/tests/contract/test_job_payloads.py)",
+    "the additive-migration contract test (api/tests/contract/test_migrations.py)",
+    "a source-shape guard that mechanizes an invariant no runtime test can observe (the integer-cents guard, api/tests/contract/test_money_types.py)"
+  ],
+  "mandatory_tests": [
+    {
+      "when": "a change adds or alters a database migration",
+      "requires": "an additive-migration contract test in api/tests/contract/test_migrations.py",
+      "rule": ".claude/rules/migrations.md"
+    },
+    {
+      "when": "a change adds or moves a background job entry point",
+      "requires": "a payload-isolation contract test in api/tests/contract/test_job_payloads.py",
+      "rule": ".claude/rules/background-jobs.md"
+    }
+  ],
+  "models": {
+    "triage": "opus",
+    "scope": "opus",
+    "spec": "fable",
+    "critic": "opus",
+    "impl": "opus",
+    "check": "opus",
+    "review": "opus",
+    "validate": "sonnet",
+    "escalation": "fable"
+  }
+}

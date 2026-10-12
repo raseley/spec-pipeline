@@ -1,0 +1,248 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "spec-pipeline configuration (.claude/spec-pipeline.json)",
+  "description": "Project configuration for the spec-pipeline command and workflow. The orchestrator command reads this file at Step 0 and passes it verbatim as args.config on every Workflow call; the workflow script applies the defaults below and validates the subset it relies on. See docs/configuration.md.",
+  "type": "object",
+  "required": ["version", "project", "lanes", "suites"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional pointer to this schema, for editor support. Ignored by the pipeline."
+    },
+    "version": {
+      "const": 1,
+      "description": "Contract version. The workflow script errors on any other value."
+    },
+    "project": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Project name, used in prompts and the PR body."
+        },
+        "description": {
+          "type": "string",
+          "default": "",
+          "description": "One sentence inlined into the triage prompt so the drafter knows the stakes framing."
+        }
+      }
+    },
+    "specs_dir": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "[^/]$",
+      "default": "docs/specs",
+      "description": "Repo-relative directory holding the three templates and the per-slug artifacts. No trailing slash."
+    },
+    "agents_dir": {
+      "type": "string",
+      "minLength": 1,
+      "default": ".claude/agents",
+      "description": "Where agent definitions live; cited in role sentences and the spec template's routing rule."
+    },
+    "rules_dir": {
+      "type": "string",
+      "minLength": 1,
+      "default": ".claude/rules",
+      "description": "Path-scoped rules directory. Prompts say 'if that directory exists', so it may be absent."
+    },
+    "steering": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The steering file and the headings prompts cite by name. Headings include their leading #'s.",
+      "properties": {
+        "file": { "type": "string", "minLength": 1, "default": "CLAUDE.md" },
+        "routing_heading": { "type": "string", "minLength": 1, "default": "### Agent Selection" },
+        "invariants_heading": { "type": "string", "minLength": 1, "default": "## Critical Constraints" },
+        "anti_patterns_heading": { "type": "string", "minLength": 1, "default": "### LLM-Behavior Corrections" },
+        "reference_heading": { "type": "string", "minLength": 1, "default": "## Reference" }
+      }
+    },
+    "git": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "base_branch": { "type": "string", "minLength": 1, "default": "main" },
+        "remote": { "type": "string", "minLength": 1, "default": "origin" },
+        "branch_prefixes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+          "default": ["feat", "fix"],
+          "description": "Triage's branch_prefix enum; branches are <prefix>/<slug>. First = new capability, second = correcting behaviour; with one, every workstream uses it."
+        }
+      }
+    },
+    "ship": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "forge": {
+          "enum": ["github"],
+          "default": "github",
+          "description": "Only GitHub (gh CLI) is implemented."
+        },
+        "remove_artifacts_after_pr": {
+          "type": "boolean",
+          "default": true,
+          "description": "true: ship commits the artifacts, links the spec by SHA permalink, then removes them from the branch tip (requires merge commits). false: the artifacts stay on the branch and merge with the PR (use with squash-merge repos)."
+        }
+      }
+    },
+    "triage_agent": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "default": null,
+      "description": "agentType that drafts, revises, and critiques triage. null means lanes[0].architect."
+    },
+    "lanes": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The routing domains. Lane names must be unique (checked by the workflow and scripts/verify-adoption.sh).",
+      "items": {
+        "type": "object",
+        "required": ["name", "description", "architect", "dev", "paths", "targeted_tests"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "description": "Lane token (kebab-case); appears on the triage **Lane**: line and in the triage lane enum."
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "description": "One line, inlined into the triage lane table."
+          },
+          "architect": {
+            "type": "string",
+            "minLength": 1,
+            "description": "agentType that drafts scope/spec and reviews this lane's phases."
+          },
+          "dev": {
+            "type": "string",
+            "minLength": 1,
+            "description": "agentType that implements this lane's phases."
+          },
+          "other_agents": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "default": [],
+            "description": "Further routable agents belonging to the lane; reviewed by this lane's architect."
+          },
+          "paths": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 },
+            "description": "Globs this lane owns; inlined into the triage lane table."
+          },
+          "targeted_tests": {
+            "type": "string",
+            "minLength": 1,
+            "description": "One sentence: how to run a targeted selection (runner, shape, cwd, one example)."
+          },
+          "narrow_dirs": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "default": [],
+            "description": "The only directories a phase may run whole, and only where its surface is that whole tier."
+          }
+        }
+      }
+    },
+    "unlaned_agents": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true,
+      "default": [],
+      "description": "Routable agents that belong to no lane (e.g. a docs agent). Never a triage ## AS role; reviewed by the workstream's architect."
+    },
+    "suites": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Whole-suite runs executed by validate. Their commands are also the forbidden whole-suite invocations during implement. Suite names must be unique.",
+      "items": {
+        "type": "object",
+        "required": ["name", "command"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "description": "Report label." },
+          "lane": { "type": ["string", "null"], "default": null, "description": "Informational link to a lane name." },
+          "setup": {
+            "type": "string",
+            "default": "",
+            "description": "Shell run before the command in the same shell (e.g. environment activation). Empty = none."
+          },
+          "command": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The exact full-suite command; must be correct with no flags added."
+          },
+          "cwd": { "type": "string", "minLength": 1, "default": ".", "description": "Repo-relative directory to run from." },
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1800000,
+            "default": 600000,
+            "description": "Bash timeout. Above 600000 the validate agent runs the suite in the background with this timeout. 1800000 is the tool's hard cap."
+          },
+          "notes": { "type": "string", "default": "", "description": "Runner caveats inlined verbatim into the validate prompt." }
+        }
+      }
+    },
+    "whole_suite_patterns": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "default": [],
+      "description": "Extra phrasings of 'the whole suite' to forbid during implement, beyond suites[].command."
+    },
+    "invariants": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "default": [],
+      "description": "Names of load-bearing invariants, each a heading under steering.invariants_heading."
+    },
+    "protected_guards": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "default": [],
+      "description": "Guard test kinds the architect review's test-proportionality step never flags. The generic source-shape clause is always appended."
+    },
+    "mandatory_tests": {
+      "type": "array",
+      "default": [],
+      "description": "Tests a change still owes even under 'no test for a move or rename'.",
+      "items": {
+        "type": "object",
+        "required": ["when", "requires"],
+        "additionalProperties": false,
+        "properties": {
+          "when": { "type": "string", "minLength": 1, "description": "The change that triggers the obligation (completes 'When ...')." },
+          "requires": { "type": "string", "minLength": 1, "description": "The test owed (completes 'the change still owes ...')." },
+          "rule": { "type": ["string", "null"], "description": "Optional path of the path-scoped rule defining it." }
+        }
+      }
+    },
+    "models": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Model tier per call kind. Values are names the Claude Code agent 'model' option accepts (e.g. fable, opus, sonnet, haiku).",
+      "properties": {
+        "triage": { "type": "string", "minLength": 1, "default": "opus" },
+        "scope": { "type": "string", "minLength": 1, "default": "opus" },
+        "spec": { "type": "string", "minLength": 1, "default": "fable" },
+        "critic": { "type": "string", "minLength": 1, "default": "opus" },
+        "impl": { "type": "string", "minLength": 1, "default": "opus" },
+        "check": { "type": "string", "minLength": 1, "default": "opus" },
+        "review": { "type": "string", "minLength": 1, "default": "opus" },
+        "validate": { "type": "string", "minLength": 1, "default": "sonnet" },
+        "escalation": { "type": "string", "minLength": 1, "default": "fable" }
+      }
+    }
+  }
+}
