@@ -28,7 +28,10 @@ Only one stage runs at a time. If a stage is running, wait for it.
 | **Divergent return** | The return and the artifact's status disagree | The file wins. Inspect it, fix it or re-run the stage. |
 | **Unclean critique** | "written but still flagged" plus the residual issues | Judge them: `advance` if they don't matter, `refine:` if they do. |
 | **Critique unavailable** | "verdict unavailable" | The critic died. Re-run or review the artifact yourself. |
+| **Possibly dropped commitment** (scope, spec) | Anchors listed as unassigned or uncovered (a source section or decision, a scope goal `G<n>`, or `phase: <title>`) and a final critique that is not clean | Check that each named anchor landed in the artifact. `advance` if it did, `refine:` if it did not. |
+| **Plan agent died** (scope, spec) | "plan agent returned no result; nothing written" | Re-run the stage. |
 | **Halted phase** | The phase, its unmet criteria and blocking concerns, the phases not yet run | Fix directly, `refine:` the spec, `rewind`, or escalate. Then `advance` re-sends from the halted phase. |
+| **Phase commit failed** | A passed, sound phase with a commit `error`, usually a pre-commit hook's output | Fix what the hook flagged. The orchestrator then commits the phase by hand with its `Spec-Phase` trailer, and `advance` continues from the next phase. |
 | **Validate failed** | Per-suite counts and failing test ids | Fix, then `advance` (validate runs again). Never ship on red. |
 
 When reading implement results:
@@ -39,6 +42,13 @@ When reading implement results:
   substituted, and validate settles the global claim. Not failures.
 - **Observations** are true but non-blocking (adjacent defects, follow-ups, wording drift). They go into the
   PR body at ship.
+- **Each passed phase is a commit** on the branch, reported with its short SHA and subject. "Nothing to
+  commit" is not a failure. **Unexpected paths** are staged files the phase scope does not name; they are
+  already in the commit, so decide whether they belong.
+
+When reading scope and spec results, the **composition** line says how many partitions the plan chose and
+why, how many agents ran, and which anchors (if any) were unassigned or uncovered before the synthesizer
+landed them. A small change gets one partition; a large source gets up to six parallel drafters.
 
 ## Refining: inline vs structural
 
@@ -75,8 +85,8 @@ If the top tier is unavailable to you, set `models.spec` and `models.escalation`
 
 - They are **untracked** while you work. Read them and edit them freely; the next stage reads whatever is on disk.
 - Entering implement flips the spec to `**Status**: Final` (that is the approval).
-- **Ship** commits them with the implementation (only this slug's three), links the spec by SHA, then removes
-  them from the branch tip with `chore(specs): remove <slug> pipeline artifacts`. With
+- **Ship** commits them on their own after the per-phase implementation commits (only this slug's three),
+  links the spec by that commit's SHA, then removes them from the branch tip with `chore(specs): remove <slug> pipeline artifacts`. With
   `remove_artifacts_after_pr: false` they stay and merge with the PR.
 - Never `git add -A` over the specs directory and never glob-delete in it: it holds the templates and other
   workstreams' drafts.
@@ -94,9 +104,9 @@ harmlessly across checkouts and are excluded from every ship commit.
 2. Restore the artifacts:
    `git restore --source=<spec-sha> -- <specs_dir>/<slug>-triage.md <specs_dir>/<slug>-scope.md <specs_dir>/<slug>.md`
 3. `rewind` or `refine` as usual; then validate.
-4. The orchestrator commits the rework without the artifacts and pushes to the existing PR, then deletes the
-   restored files. If the rework changed an artifact, it is committed and then removed again, so the revision
-   is in history.
+4. A re-run of implement commits its phases itself. The orchestrator commits any direct fix without the
+   artifacts and pushes to the existing PR, then deletes the restored files. If the rework changed an
+   artifact, it is committed on its own and then removed again, so the revision is in history.
 
 ## Good ideas to feed it
 

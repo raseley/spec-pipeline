@@ -8,9 +8,9 @@ export const meta = {
     // args.config.models; every call sets one explicitly, so no call inherits the session model
     // or an agent definition's frontmatter.
     { title: "Triage",    detail: "Verify the raw idea against the tree, route to a configured lane's architect and classify the change type (branch prefix) - or return blocked when routing cannot be decided; write <specs_dir>/<slug>-triage.md; triage-tier draft/revise, critic-tier critic", model: "opus" },
-    { title: "Scope",     detail: "Goals, non-goals, files-affected; write <specs_dir>/<slug>-scope.md; scope-tier draft/revise, critic-tier critic", model: "opus" },
-    { title: "Spec",      detail: "Draft <specs_dir>/<slug>.md per <specs_dir>/spec-template.md (Status: Draft); spec-tier (top tier by default) draft/revise, critic-tier critic", model: "fable" },
-    { title: "Implement", detail: "Run each spec phase via its routed dev agent (impl tier; implModel escalates); criteria-check (check tier), then qualitative architect review (review tier) only if that passes; halts at the first failing phase", model: "opus" },
+    { title: "Scope",     detail: "Goals, non-goals, files-affected; write <specs_dir>/<slug>-scope.md. Compose: a scope-tier plan partitions the source's anchors (1 to 6, sized to the source). One scope-tier drafter per partition, a scope-tier synthesizer, and parallel critic-tier critics (template, per-partition fidelity, tree grounding). Scope-tier revise and critic-tier scoped re-check, up to 2 rounds. Feedback: one scope-tier reviser, one critic-tier critic", model: "opus" },
+    { title: "Spec",      detail: "Draft <specs_dir>/<slug>.md per <specs_dir>/spec-template.md (Status: Draft). Compose: a spec-tier (top tier by default) plan reads the scope and fixes the phase outline, core principle, shared interfaces, and partitions (1 to 6, sized to the scope). One spec-tier drafter per partition writes its design and full phase blocks, a spec-tier synthesizer writes the file, and parallel critic-tier critics (template, per-partition narrowest reader, per-partition scope fidelity, cross-partition coherence) audit. Spec-tier revise and critic-tier scoped re-check, up to 2 rounds. Feedback: one spec-tier reviser, one critic-tier critic", model: "fable" },
+    { title: "Implement", detail: "Run each spec phase via its routed dev agent (impl tier; implModel escalates); criteria-check (check tier), then qualitative architect review (review tier) only if that passes; commit each passed phase (commit tier); halts at the first failing phase", model: "opus" },
     { title: "Validate",  detail: "Full-suite regression gate before ship: run every configured full suite, report-only", model: "sonnet" }
   ]
 };
@@ -58,7 +58,7 @@ const { slug, idea, date, stage, feedback, architect, phases, model, implModel }
 // adopter omitted means the same thing to both.
 const DEFAULT_MODELS = {
   triage: "opus", scope: "opus", spec: "fable", critic: "opus",
-  impl: "opus", check: "opus", review: "opus", validate: "sonnet", escalation: "fable"
+  impl: "opus", check: "opus", review: "opus", commit: "sonnet", validate: "sonnet", escalation: "fable"
 };
 
 function isObj(x) { return !!x && typeof x === "object" && !Array.isArray(x); }
@@ -407,12 +407,35 @@ commitment silently.`;
 // revise(). It carries a contract between a stage's return and its own artifact that no critic
 // can enforce (triage's Status/Lane/Branch agreement, see TRIAGE_REVISER_CONTRACT). It defaults
 // to "", so a caller that omits it changes nothing.
-async function refine(agentType, draftPrompt, critiquePrompt, schema, label, ph, artifactPath, templatePath, { draftModel, feedback, stageInstructions = "" } = {}) {
+//
+// The machinery is split three ways so the scope and spec compose paths can reuse it.
+// refineKit() builds one stage's critic and reviser. reviseLoop() runs the revise -> scoped
+// re-check rounds from any draft result and critique. refine() is the single-drafter path. Triage
+// always takes it. Scope and spec take it only on feedback rounds. Their compose paths build
+// their own draft and a merged lens critique, then hand both to the same reviseLoop(). A large
+// composition is therefore revised and re-checked exactly as a small one is.
+
+// Composition caps for the scope and spec compose paths. Each one bounds how many agents a
+// compose round runs, and so how much source one agent must hold. A source with more natural
+// divisions than a cap allows gets coarser groups, not dropped ones. Every place a cap applies
+// logs what it bounded. meta is a pure literal, so its phase details repeat these numbers.
+const MAX_SCOPE_PARTITIONS = 6;  // scope drafters, and so per-partition fidelity critics
+const MAX_SPEC_PARTITIONS = 6;   // spec drafters, and so per-partition narrowest-reader and fidelity critics
+
+// agents_run in the scope and spec returns counts every agent call the stage started, including
+// calls that came back null. The orchestrator reports it, so a large composition's cost is visible.
+let agentsRun = 0;
+const runAgent = (prompt, opts) => { agentsRun++; return agent(prompt, opts); };
+
+function refineKit(agentType, schema, label, ph, artifactPath, templatePath, { draftModel, stageInstructions = "" } = {}) {
   const draftOpts = { model: model || draftModel };
-  const critic = (prompt) => agent(
+  // `lens` names one critic of a parallel panel. Its label must differ from its siblings', so the
+  // progress tree and the journal can tell them apart. The single critic and every scoped
+  // re-check keep the plain `${label}:critic` label.
+  const critic = (prompt, lens) => runAgent(
     `${prompt} Set clean=true only if nothing checked is unmet. Otherwise list every unmet point in issues.`,
     {
-      label: `${label}:critic`, phase: ph, agentType, model: M.critic,
+      label: lens ? `${label}:critic:${lens}` : `${label}:critic`, phase: ph, agentType, model: M.critic,
       schema: {
         type: "object", required: ["clean", "issues"],
         properties: {
@@ -442,20 +465,45 @@ async function refine(agentType, draftPrompt, critiquePrompt, schema, label, ph,
          artifact's question section as the MIRRORING rules below say.`;
     return `\n${OQ_GUIDANCE}${carry}`;
   };
-  const revise = (instructions, priorOQ) => agent(
+  const revise = (instructions, priorOQ) => runAgent(
     `Read ${artifactPath} and revise it in place. Each agent call is a fresh context. Start by
      reading the artifact and ${templatePath}. Keep the artifact within the template's section
      bounds. Change nothing the points below do not implicate. Do not introduce new issues.
      Overwrite ${artifactPath} in place.\n${instructions}${oqInstructions(priorOQ)}${stageInstructions}`,
     { label: `${label}:revise`, phase: ph, agentType, schema, ...draftOpts }
   );
+  return { agentType, schema, label, ph, artifactPath, templatePath, draftOpts, critic, revise };
+}
+
+// Up to 2 rounds of (revise -> scoped re-check), from a draft result and the critique of it.
+// `rounds` tells a compose path whether the round cap, not a clean re-check, ended the loop.
+async function reviseLoop(kit, result, critique) {
+  let round = 0;
+  for (; round < 2 && critique && !critique.clean; round++) {
+    // Hand the current best questions forward so a round that fixes the artifact cannot rewrite
+    // the questions as a side effect; `result` is the drafter's on round 0, the prior reviser's after.
+    const revised = await kit.revise(
+      `Resolve every issue below:\n${critique.issues.join("; ")}`,
+      result?.open_questions
+    );
+    if (revised) result = revised; // reviser skipped/died — keep the prior result rather than dropping it
+    critique = await kit.critic(   // scoped re-check so the loop can actually terminate early
+      `Read ${kit.artifactPath}. Verify each previously-raised issue below is now resolved. Check
+       only these issues. Do not open a fresh audit of the rest of the artifact.\n${critique.issues.join("; ")}`
+    );
+  }
+  return { result, critique, rounds: round };
+}
+
+async function refine(agentType, draftPrompt, critiquePrompt, schema, label, ph, artifactPath, templatePath, { draftModel, feedback, stageInstructions = "" } = {}) {
+  const kit = refineKit(agentType, schema, label, ph, artifactPath, templatePath, { draftModel, stageInstructions });
 
   if (feedback) {
-    const result = await revise(
+    const result = await kit.revise(
       `--- reviewer feedback (address every point) ---\n${feedback}\n--- end feedback ---`
     );
     if (!result) return { result: null, critique: null }; // reviser skipped/died — nothing written to critique
-    const critique = await critic(
+    const critique = await kit.critic(
       `Read ${artifactPath}. Verify it addresses each reviewer feedback point below. Verify it
        stays within ${templatePath}'s section bounds. Check only these points. Do not re-audit
        the rest of the artifact.\n--- reviewer feedback ---\n${feedback}\n--- end feedback ---`
@@ -463,23 +511,10 @@ async function refine(agentType, draftPrompt, critiquePrompt, schema, label, ph,
     return { result, critique };
   }
 
-  let result = await agent(draftPrompt, { label, phase: ph, agentType, schema, ...draftOpts });
+  const result = await runAgent(draftPrompt, { label, phase: ph, agentType, schema, ...kit.draftOpts });
   if (!result) return { result: null, critique: null }; // draft agent skipped/died — nothing written to critique
-  let critique = await critic(critiquePrompt); // the stage's one full template audit
-  for (let round = 0; round < 2 && critique && !critique.clean; round++) {
-    // Hand the current best questions forward so a round that fixes the artifact cannot rewrite
-    // the questions as a side effect; `result` is the drafter's on round 0, the prior reviser's after.
-    const revised = await revise(
-      `Resolve every issue below:\n${critique.issues.join("; ")}`,
-      result?.open_questions
-    );
-    if (revised) result = revised; // reviser skipped/died — keep the prior result rather than dropping it
-    critique = await critic(       // scoped re-check so the loop can actually terminate early
-      `Read ${artifactPath}. Verify each previously-raised issue below is now resolved. Check
-       only these issues. Do not open a fresh audit of the rest of the artifact.\n${critique.issues.join("; ")}`
-    );
-  }
-  return { result, critique };
+  const critique = await kit.critic(critiquePrompt); // the stage's one full template audit
+  return reviseLoop(kit, result, critique);
 }
 
 // One-line critic verdict for stage logs.
@@ -487,6 +522,80 @@ function verdictNote(critique) {
   if (!critique) return "critic verdict unavailable";
   return critique.clean ? "critic verdict clean" : `critic still flags ${critique.issues.length} issue(s)`;
 }
+
+// Folds a parallel lens panel into the one critique reviseLoop() takes. Each issue is prefixed
+// with its lens, so the reviser and the scoped re-check know which reading raised it. A dead lens
+// is an unknown verdict, never a clean one. Its `fallback` becomes an issue that restates what
+// the lens would have checked, so the re-check can still verify it. `extra` carries issues the
+// stage found in plain JS, already prefixed.
+function mergeCritiques(lenses, extra = []) {
+  const issues = [...extra];
+  let clean = extra.length === 0;
+  for (const { lens, critique, fallback } of lenses) {
+    if (!critique) { clean = false; issues.push(`[${lens}] ${fallback}`); continue; }
+    if (!critique.clean) clean = false;
+    for (const issue of critique.issues) issues.push(`[${lens}] ${issue}`);
+  }
+  return { clean, issues };
+}
+
+const STRINGS = { type: "array", items: { type: "string" } };
+const S = { type: "string" };
+
+// Shared by the scope and spec compose paths. A plan lists anchors (the source's enumerable
+// commitments) and partitions them. Drafters return fragments, never the file, because parallel
+// writers to one file lose each other's updates. Every fragment item carries the anchors it
+// serves, so coverage is a set difference in plain JS instead of something no one checks.
+const ANCHORED = (properties, required) => ({
+  type: "array",
+  items: { type: "object", required: [...required, "anchors"], properties: { ...properties, anchors: STRINGS } }
+});
+const bullets = (lines) => lines.map((l) => `- ${l}`).join("\n");
+const gapsBlock = (gaps) => gaps.length
+  ? `--- known gaps ---\n${bullets(gaps)}\n--- end known gaps ---`
+  : "There are no known gaps.";
+const crossCuttingBlock = (plan) => plan.cross_cutting.length
+  ? `--- cross-cutting decisions ---\n${bullets(plan.cross_cutting.map((x) => `${x.anchor}: ${x.why}`))}\n--- end cross-cutting decisions ---`
+  : "There are no cross-cutting decisions.";
+
+// Partition ids become agent labels, lens prefixes, and gap-line owners, so each must be unique.
+// "unassigned" is reserved for the unassigned-anchors fidelity critic.
+function uniquePartitionIds(plan, stageName) {
+  const taken = new Set(["unassigned"]);
+  plan.partitions.forEach((p, i) => {
+    if (!taken.has(p.id)) { taken.add(p.id); return; }
+    let id = `${p.id}-${i + 1}`;
+    while (taken.has(id)) id += "x";
+    log(`${stageName} plan reused partition id "${p.id}"; partition ${i + 1} ("${p.title}") is relabelled "${id}".`);
+    p.id = id;
+    taken.add(id);
+  });
+}
+
+// Plain-JS check of a plan's anchor assignment. Its gaps go to the synthesizer and the fidelity
+// critics as known gaps, and into the return. None is dropped silently.
+function planGaps(plan) {
+  const owners = new Map();
+  for (const p of plan.partitions) {
+    for (const an of new Set(p.anchors)) owners.set(an, [...(owners.get(an) || []), p.id]);
+  }
+  const known = new Set(plan.anchors);
+  return {
+    unassigned: [...known].filter((an) => !owners.has(an)),
+    duplicated: [...owners].filter(([, ids]) => ids.length > 1).map(([anchor, ids]) => ({ anchor, ids })),
+    foreign:    [...owners.keys()].filter((an) => !known.has(an))
+  };
+}
+const planGapLines = (g) => [
+  ...g.unassigned.map((an) => `${an}: the plan assigned it to no partition.`),
+  ...g.duplicated.map((d) => `${d.anchor}: the plan assigned it to partitions ${d.ids.join(" and ")}. State it once, consistently.`),
+  ...g.foreign.map((an) => `${an}: a partition lists it, but the plan's anchor list does not.`)
+];
+
+// One-line summary of a lens panel's verdicts for stage logs.
+const lensSummary = (lenses, verdicts) => lenses
+  .map((l, i) => `${l.lens}=${verdicts[i] ? (verdicts[i].clean ? "clean" : `${verdicts[i].issues.length} issue(s)`) : "no result"}`)
+  .join(", ");
 
 // Guards shared by every stage. A missing slug would name no artifact; a missing date would make
 // a drafter invent one. Both are orchestrator bugs, so they fail the call before any agent runs.
@@ -684,42 +793,21 @@ ${LANE_TABLE}
 
 // --- Scope: goals / non-goals / files-affected, by the chosen architect ---
 // Conformed to <specs_dir>/scope-template.md.
+//
+// A compose round plans its own composition. A single drafter over a large source drops
+// commitments silently, and a single template critic never checks fidelity to the source. So a
+// plan agent first lists the source's commitments as anchors and partitions them. There is one
+// compose path, and it scales with the plan: a small source gets one partition and so one
+// drafter, a large one up to MAX_SCOPE_PARTITIONS. The drafters return fragments, one
+// synthesizer writes the artifact, and parallel lens critics audit it. Anchors make a dropped
+// commitment countable in plain JS instead of invisible. A dead plan agent ends the stage with an
+// error rather than drafting with no anchors to check. A feedback round is unchanged.
 if (stage === "scope") {
   phase("Scope");
-  const { result: scope, critique } = await refine(
-    architect, // carried forward from the triage return value
-    `AS. ${roleOf(architect)}
-
-     OBSERVE. Read ${SPECS}/${slug}-triage.md as the refined idea. Use its ## OBSERVE verified
-     facts. Use its ## CONSIDERING bullets. Use the hand-off sentence and every **Decided** entry
-     of its ## OUTPUT. Its ## ORDER records how triage reasoned. It is not a plan for you.
-
-     CONSIDERING. Use ${SPECS}/scope-template.md as the artifact's shape and per-section rules.
-     Use the \`${c.rules_dir}/*.md\` files whose globs overlap the likely files-affected set, if
-     that directory exists. Use the working tree.
-
-     ORDER.
-     1. Triage -> an executive summary. It names the causal mechanism as a relation between two
-        named surfaces.
-     2. Mechanism -> goals. Write one goal per distinct verifiable outcome on ${SURFACE}. Run
-        every grep, count, or enumeration a goal cites. Name the check in a few words
-        and state its observed number. Keep the full recipe (command pipelines, fixture wiring,
-        assertion text) out of the goal; it belongs in the spec's Acceptance Criteria.
-     3. Goals -> non-goals. Each non-goal names something a spec author could reach for from these
-        goals. Each non-goal states its reason.
-     4. Scope -> the files-affected map. Sweep it with grep -rn for copies and call sites of what
-        changes.
-     5. Files -> dependencies by direction.
-     6. Dependencies -> open questions, or the explicit no-questions sentence.
-     7. The draft -> the template's Composition-Time Self-Check. Do Part A by reading what you
-        wrote. Do Part B by running it against the tree.
-
-     VALIDATE the artifact must hold when reframed as "the spec author reads only this file" -
-     every goal still adjudicable, every non-goal still naming a surface those goals reach,
-     every path still resolving - with no recourse to the triage,
-     OUTPUT ${SPECS}/${slug}-scope.md with Slug: ${slug}, Date: ${date}, Status: Draft, its
-     six H2 sections in template order, no HTML comments, and nothing after ## Open Questions.
-     ${OQ_GUIDANCE}${SCOPE_MIRROR}`,
+  const scopePath = `${SPECS}/${slug}-scope.md`;
+  const scopeTemplate = `${SPECS}/scope-template.md`;
+  // `architect` is carried forward from the triage return value.
+  const SCOPE_CRITIQUE =
     `AS an adversarial critic, OBSERVE ${SPECS}/${slug}-scope.md, CONSIDERING Part A of
      ${SPECS}/scope-template.md's Composition-Time Self-Check and the per-section rules in that
      template's comments, by ORDER (1) each Part A bullet -> the artifact line that satisfies or
@@ -730,72 +818,377 @@ if (stage === "scope") {
      nor this slug's branch in either direction; every ## Open Questions entry is in exactly one of
      the two entry shapes, numbering unbroken, no seventh H2, the no-questions sentence only when
      the section has no entries; (2) failures -> issues, each naming the section and the unmet
-     rule, VALIDATE every issue must name the template rule it rests on, OUTPUT clean and issues.`,
-    {
-      type: "object",
-      required: ["scope_path", "open_questions"],
-      properties: { scope_path: { type: "string" }, open_questions: OQ }
-    },
-    "scope", "Scope", `${SPECS}/${slug}-scope.md`, `${SPECS}/scope-template.md`,
-    // Scope restates the triage's verified idea as goals, non-goals, and a files-affected map,
-    // each checked against the tree. It runs on the scope tier (config.models.scope). The top
-    // tier is reserved for the spec stage by default, whose defects are the expensive ones.
-    { draftModel: M.scope, feedback, stageInstructions: SCOPE_REVISER_CONTRACT }
-  );
+     rule, VALIDATE every issue must name the template rule it rests on, OUTPUT clean and issues.`;
+  const SCOPE_SCHEMA = {
+    type: "object",
+    required: ["scope_path", "open_questions"],
+    properties: { scope_path: { type: "string" }, open_questions: OQ }
+  };
+  // Scope restates the triage's verified idea as goals, non-goals, and a files-affected map,
+  // each checked against the tree. It runs on the scope tier (config.models.scope). The top
+  // tier is reserved for the spec stage by default, whose defects are the expensive ones. The
+  // plan, the partition drafters, and the synthesizer are drafter-class calls, so they share this
+  // tier and the `model` override.
+  const scopeOpts = { draftModel: M.scope, stageInstructions: SCOPE_REVISER_CONTRACT };
+
+  // Anchors are the plan's unit of coverage. A decision-register ID or a section id names one
+  // commitment the scope must land somewhere, so "was it dropped?" becomes a set difference.
+  const SCOPE_PLAN_SCHEMA = {
+    type: "object",
+    required: ["anchors", "partitions", "cross_cutting", "rationale"],
+    properties: {
+      anchors: { ...STRINGS, description: "Every enumerable commitment in the source, each a unique string." },
+      partitions: {
+        type: "array", minItems: 1, maxItems: MAX_SCOPE_PARTITIONS,
+        items: {
+          type: "object",
+          required: ["id", "title", "source_sections", "anchors", "surfaces"],
+          properties: {
+            id:              { type: "string" },
+            title:           { type: "string" },
+            source_sections: { ...STRINGS, description: "Each entry names the document path and the section, e.g. \"docs/proposals/x.md §2.5\"." },
+            anchors:         STRINGS,
+            surfaces:        { ...STRINGS, description: "Repo paths or directories this partition's commitments touch." }
+          }
+        }
+      },
+      cross_cutting: {
+        type: "array",
+        items: { type: "object", required: ["anchor", "why"], properties: { anchor: { type: "string" }, why: { type: "string" } } }
+      },
+      rationale: { type: "string", description: "Why this partition count." }
+    }
+  };
+  const SCOPE_PLAN =
+    `AS. ${roleOf(architect)} You plan how the scope for workstream "${slug}" is composed. You
+     write no file.
+
+     OBSERVE. Read ${SPECS}/${slug}-triage.md. Then read in full every source document it
+     names: its **Source** line, the raw idea it records, and every document its ## OBSERVE cites.
+     Use the working tree to place each commitment on a surface.
+
+     CONSIDERING. One drafter writes each partition, and a synthesizer merges the partitions into
+     ${SPECS}/${slug}-scope.md. A drafter that holds more source than it can verify drops
+     commitments without saying so. You may plan at most ${MAX_SCOPE_PARTITIONS} partitions.
+
+     ORDER.
+     1. Sources -> anchors. List every enumerable commitment. When a source has a decision
+        register, its IDs are the anchors, every row of it. Otherwise use stable section ids such
+        as "§2.5.1". Anchors are unique strings. When two sources share an id scheme, prefix each
+        anchor with its document's basename. A source with no sections (a one-paragraph idea)
+        gets one anchor per distinct commitment it makes.
+     2. Anchors -> partitions. Group them by subsystem and source section, so one drafter can
+        hold its partition's source text in full. A source small enough for one drafter gets
+        exactly one partition.
+     3. Each anchor -> exactly one partition's anchors.
+     4. Decisions that constrain more than one partition -> cross_cutting, each with why. A
+        cross-cutting anchor is still assigned to exactly one partition.
+     5. Partition count -> rationale.
+
+     VALIDATE. Every anchor appears in exactly one partition. No partition lists an anchor that
+     is not in anchors. Every source section that commits to anything lies in some partition.
+
+     OUTPUT. Return the plan. Each source_sections entry names the document path and the section.
+     Each surfaces entry is a repo path or directory.`;
+
+  const SCOPE_FRAGMENT_SCHEMA = {
+    type: "object",
+    required: ["goals", "non_goals", "files", "dependencies", "open_questions", "no_scope_consequence"],
+    properties: {
+      goals:     ANCHORED({ text: S, check: { type: "string", description: "The check's name and its observed number." } }, ["text", "check"]),
+      non_goals: ANCHORED({ text: S, reason: S }, ["text", "reason"]),
+      // `group` tells the synthesizer which **Reads** / **Creates or modifies** list a path joins.
+      files:     ANCHORED({ path: S, change: S, group: { enum: ["reads", "creates_or_modifies"] } }, ["path", "change", "group"]),
+      dependencies: {
+        type: "array",
+        items: { type: "object", required: ["direction", "item"], properties: { direction: { enum: ["depends_on", "depended_on_by"] }, item: S } }
+      },
+      // The OQ shape plus the template's "Closed by" clause, which the synthesizer must write.
+      open_questions: ANCHORED({ ...OQ.items.properties, closed_by: S }, [...OQ.items.required, "closed_by"]),
+      no_scope_consequence: {
+        type: "array",
+        items: { type: "object", required: ["anchor", "reason"], properties: { anchor: S, reason: S } }
+      }
+    }
+  };
+  const partitionDraft = (p, plan) =>
+    `AS. ${roleOf(architect)} You draft partition "${p.id}: ${p.title}" of the scope for
+     workstream "${slug}". A synthesizer merges every partition's fragments into the artifact.
+
+     OBSERVE. Read ${SPECS}/${slug}-triage.md as the refined idea. Use its ## OBSERVE verified
+     facts, its ## CONSIDERING bullets, the hand-off sentence, and every **Decided** entry of its
+     ## OUTPUT. Read these source sections in full: ${p.source_sections.join("; ")}.
+
+     CONSIDERING. Your anchors are ${p.anchors.join(", ")}. Your surfaces are
+     ${p.surfaces.join(", ")}. Other partitions cover the rest of the source. Do not draft outside
+     yours. Honour every cross-cutting decision below. Use ${scopeTemplate} for what a goal, a
+     non-goal, a files entry, a dependency, and an open question must be. Use the
+     \`${c.rules_dir}/*.md\` files whose globs overlap your surfaces, if that directory exists.
+     Use the working tree.
+
+     ORDER.
+     1. Each anchor -> the source text that commits to it.
+     2. Commitments -> goals. Write one goal per distinct verifiable outcome on ${SURFACE}. Run
+        every grep, count, or enumeration a goal cites. Put the check's name and its observed
+        number in check. Keep the full recipe (command pipelines, fixture wiring, assertion text)
+        out of the goal; it belongs in the spec's Acceptance Criteria.
+     3. Goals -> non-goals. Each non-goal names something a spec author could reach for from these
+        goals. Each non-goal states its reason.
+     4. Goals -> files. Sweep with grep -rn for copies and call sites of what changes. Every path
+        is repo-rooted and contains a "/".
+     5. Files -> dependencies by direction. Never name ${SPECS}/${slug}.md,
+        ${SPECS}/${slug}-triage.md, or this slug's branch.
+     6. Dependencies -> open questions. Each names in closed_by the evidence or decision that
+        would close it.
+     7. Each anchor -> at least one item whose anchors list it, or a no_scope_consequence entry
+        that says why it changes nothing in this workstream.
+
+     VALIDATE. Every anchor of yours is covered. Every goal is adjudicable by a spec author who
+     reads only the scope. No item contradicts a cross-cutting decision.
+
+     OUTPUT. Do not write or edit any file. The synthesizer alone writes ${scopePath}, and a
+     second writer would lose its updates. Return the fragments. Every item carries the anchors
+     it serves.
+     ${OQ_GUIDANCE}
+     closed_by is technical. It may name paths and types.
+     ${crossCuttingBlock(plan)}`;
+
+  const synthesize = (plan, fragments, gaps) =>
+    `AS. ${roleOf(architect)} You write the scope for workstream "${slug}" from the fragments of
+     ${plan.partitions.length} partition drafter(s).
+
+     OBSERVE. Read ${SPECS}/${slug}-triage.md as the refined idea. Read the fragments below. Each
+     carries the partition it came from and the anchors every item serves.
+
+     CONSIDERING. Use ${scopeTemplate} as the artifact's shape and per-section rules. Honour
+     every cross-cutting decision below. Use the working tree. The known gaps below are anchors
+     no fragment covers, or that the plan assigned to no partition or to more than one. For each
+     gap, read the source the triage names, then land the anchor as a goal, a non-goal, or an
+     open question where the source supports it. Never drop a gap silently.
+
+     ORDER.
+     1. Fragments -> an executive summary. It names the causal mechanism as a relation between two
+        named surfaces.
+     2. Goals -> one goal per distinct verifiable outcome. Merge duplicates. Reconcile goals that
+        overlap across partitions into one. Re-run any check whose observed number a merge changes.
+     3. Non-goals -> merged. Where one partition excludes what another commits to, raise the
+        conflict as an open question. Do not settle it silently.
+     4. Files -> one ## Files Affected map with **Reads** and **Creates or modifies**, deduplicated,
+        and a **Not yet enumerated** line.
+     5. Dependencies -> merged by direction.
+     6. Open questions -> merged and numbered, each closed by its closed_by clause, or the explicit
+        no-questions sentence.
+     7. The draft -> the template's Composition-Time Self-Check. Do Part A by reading what you
+        wrote. Do Part B by running it against the tree.
+
+     VALIDATE the artifact must hold when reframed as "the spec author reads only this file" -
+     every goal still adjudicable, every non-goal still naming a surface those goals reach,
+     every path still resolving - with no recourse to the triage. The artifact carries no anchor
+     ids, no partition names, and no trace section; the template allows none.
+
+     OUTPUT ${scopePath} with Slug: ${slug}, Date: ${date}, Status: Draft, its six H2 sections
+     in template order, no HTML comments, and nothing after ## Open Questions.
+     ${OQ_GUIDANCE}${SCOPE_MIRROR}
+     ${crossCuttingBlock(plan)}
+     ${gapsBlock(gaps)}
+     --- fragments ---
+     ${JSON.stringify(fragments, null, 2)}
+     --- end fragments ---`;
+
+  const fidelityCritique = (p, plan, gaps) =>
+    `AS. You are a source-fidelity critic for partition "${p.id}: ${p.title}" of workstream "${slug}".
+
+     OBSERVE. Read these source sections: ${p.source_sections.join("; ")}. Read ${scopePath}.
+
+     CONSIDERING. The anchors to check are ${p.anchors.join(", ")}. Each is a commitment the
+     source makes. Honour every cross-cutting decision below. The known gaps below are coverage
+     failures found before the scope was written. Check those that name one of your anchors.
+
+     ORDER.
+     1. Each anchor -> the source text that states it.
+     2. Source text -> where it lands in the scope: a ## Goals entry, a ## Non-Goals entry, a
+        ## Open Questions entry, or legitimately out of scope (the source defers it, or it has no
+        consequence for this workstream's surfaces).
+     3. An anchor that lands nowhere, or lands widened, narrowed, or contradicted -> an issue.
+     4. Each cross-cutting decision -> no scope line contradicts it.
+
+     VALIDATE. A later checker sees only your issue text and the scope, never this partition. So
+     every issue names the anchor, the source document and section, what the source commits to in
+     one sentence, and what the scope says or omits. Do not audit template form or tree paths.
+     Other critics own those.
+
+     OUTPUT. Return clean and issues.
+     ${crossCuttingBlock(plan)}
+     ${gapsBlock(gaps)}`;
+
+  const SCOPE_TREE_CRITIQUE =
+    `AS. You are a tree-grounding critic.
+
+     OBSERVE. Read ${scopePath}. Use the working tree.
+
+     CONSIDERING. Use Part B of ${scopeTemplate}'s Composition-Time Self-Check. Run each check.
+     Do not assert its result.
+
+     ORDER.
+     1. Every ## Files Affected path -> it exists on the tree now, or its bullet says this
+        workstream creates it.
+     2. Every observed number in ## Goals -> re-run the check the goal names and compare.
+     3. What the goals change -> grep -rn for parallel fixtures, duplicated literals, sibling
+        helpers, and call sites. Each hit is listed in ## Files Affected or explained there.
+     4. Failures -> issues.
+
+     VALIDATE. Each issue names the path or goal, the command you ran, and what it returned. Do
+     not audit template form or source fidelity. Other critics own those.
+
+     OUTPUT. Return clean and issues.`;
+
+  const composeScope = async (plan, gaps) => {
+    const kit = refineKit(architect, SCOPE_SCHEMA, "scope", "Scope", scopePath, scopeTemplate, scopeOpts);
+    const fragments = await parallel(plan.partitions.map((p) => () => runAgent(
+      partitionDraft(p, plan),
+      { label: `scope:draft:${p.id}`, phase: "Scope", agentType: architect, schema: SCOPE_FRAGMENT_SCHEMA, ...kit.draftOpts }
+    )));
+    plan.partitions.forEach((p, i) => {
+      if (!fragments[i]) log(`scope partition "${p.id}" drafter returned no result; its ${p.anchors.length} anchor(s) go to the synthesizer and its fidelity critic as known gaps.`);
+    });
+
+    // Plain-JS coverage check. An anchor counts as covered when a fragment of a partition that
+    // owns it serves it, or names it in no_scope_consequence. Another partition citing it does
+    // not count. Cross-cutting anchors are cited everywhere, and a dead owner must still show
+    // them as gaps.
+    const coveredBy = fragments.map((f) => {
+      const got = new Set();
+      if (!f) return got;
+      for (const key of ["goals", "non_goals", "files", "open_questions"]) {
+        for (const item of f[key]) for (const an of item.anchors) got.add(an);
+      }
+      for (const n of f.no_scope_consequence) got.add(n.anchor);
+      return got;
+    });
+    const owners = new Map(); // anchor -> indices of the partitions that list it
+    plan.partitions.forEach((p, i) => {
+      for (const an of new Set(p.anchors)) owners.set(an, [...(owners.get(an) || []), i]);
+    });
+    const uncovered = [];
+    for (const [an, idx] of owners) {
+      if (idx.some((i) => coveredBy[i].has(an))) continue;
+      const ps = idx.map((i) => plan.partitions[i]);
+      uncovered.push({ anchor: an, line: `${an} (partition ${ps.map((p) => p.id).join(", ")}, ${ps[0].source_sections.join("; ")}): ${idx.every((i) => !fragments[i]) ? "its partition's drafter returned no result" : "no fragment item or no_scope_consequence entry from its partition covers it"}.` });
+    }
+    if (uncovered.length) log(`scope: ${uncovered.length} anchor(s) uncovered after drafting: ${uncovered.map((u) => u.anchor).join(", ")}. Passed to the synthesizer and the fidelity critics.`);
+    const knownGaps = [...planGapLines(gaps), ...uncovered.map((u) => u.line)];
+
+    const tagged = fragments
+      .map((f, i) => f && { partition: plan.partitions[i].id, title: plan.partitions[i].title, ...f })
+      .filter(Boolean);
+    const result = await runAgent(
+      synthesize(plan, tagged, knownGaps),
+      { label: "scope:synthesize", phase: "Scope", agentType: architect, schema: SCOPE_SCHEMA, ...kit.draftOpts }
+    );
+    const uncoveredAnchors = uncovered.map((u) => u.anchor);
+    if (!result) return { result: null, critique: null, uncoveredAnchors };
+
+    // Unassigned anchors belong to no partition, so no partition's fidelity critic would check
+    // them. They get a fidelity critic of their own.
+    const targets = [...plan.partitions];
+    if (gaps.unassigned.length) {
+      targets.push({
+        id: "unassigned", title: "anchors the plan assigned to no partition",
+        source_sections: [`the source documents ${SPECS}/${slug}-triage.md names; locate each anchor there`],
+        anchors: gaps.unassigned, surfaces: []
+      });
+    }
+    const lenses = [
+      {
+        lens: "template", run: () => kit.critic(SCOPE_CRITIQUE, "template"),
+        fallback: `The template critic returned no result, so this lens is unaudited. Audit ${scopePath} against every Part A bullet of ${scopeTemplate}'s Composition-Time Self-Check.`
+      },
+      ...targets.map((p) => ({
+        lens: `fidelity:${p.id}`, run: () => kit.critic(fidelityCritique(p, plan, knownGaps), `fidelity:${p.id}`),
+        fallback: `The fidelity critic for partition "${p.id}" returned no result, so its anchors are unaudited. Confirm each of ${p.anchors.join(", ")} (source: ${p.source_sections.join("; ")}) lands in ${scopePath} as a goal, a non-goal, or an open question, or is legitimately out of scope.`
+      })),
+      {
+        lens: "tree", run: () => kit.critic(SCOPE_TREE_CRITIQUE, "tree"),
+        fallback: `The tree-grounding critic returned no result, so this lens is unaudited. Run every Part B check of ${scopeTemplate}'s Composition-Time Self-Check against ${scopePath}.`
+      }
+    ];
+    const verdicts = await parallel(lenses.map((l) => l.run));
+    const critique = mergeCritiques(lenses.map((l, i) => ({ lens: l.lens, critique: verdicts[i], fallback: l.fallback })));
+    log(`scope lens critics: ${lensSummary(lenses, verdicts)}.`);
+
+    const loop = await reviseLoop(kit, result, critique);
+    if (loop.rounds === 2 && loop.critique && !loop.critique.clean) {
+      log(`scope revise loop stopped at its 2-round cap with ${loop.critique.issues.length} issue(s) still flagged.`);
+    }
+    return { ...loop, uncoveredAnchors };
+  };
+
+  const composition = { mode: "feedback", partitions: null, rationale: null, unassigned_anchors: [], uncovered_anchors: [], agents_run: 0 };
+  let outcome;
+  if (feedback) {
+    // Structural refine: one reviser + one critic, unchanged. refine() reads no draft prompt on
+    // the feedback path, so none is passed.
+    outcome = await refine(
+      architect, null, SCOPE_CRITIQUE, SCOPE_SCHEMA,
+      "scope", "Scope", scopePath, scopeTemplate, { ...scopeOpts, feedback }
+    );
+  } else {
+    composition.mode = "partitioned";
+    const plan = await runAgent(
+      SCOPE_PLAN,
+      { label: "scope:plan", phase: "Scope", agentType: architect, schema: SCOPE_PLAN_SCHEMA, model: model || scopeOpts.draftModel }
+    );
+    if (!plan) {
+      // Drafting without a plan would leave no anchors to check the scope against.
+      log(`scope plan agent returned no result for ${slug} — nothing written.`);
+      composition.agents_run = agentsRun;
+      return { stage: "scope", error: "plan agent returned no result; nothing written. Re-run the stage.", composition };
+    }
+    plan.anchors = [...new Set(plan.anchors)];
+    uniquePartitionIds(plan, "scope");
+    const gaps = planGaps(plan);
+    const n = plan.partitions.length;
+    log(`scope plan for ${slug}: ${plan.anchors.length} anchor(s) in ${n} partition(s) (cap ${MAX_SCOPE_PARTITIONS}). ${plan.rationale}`);
+    if (n === MAX_SCOPE_PARTITIONS) log(`scope plan hit the ${MAX_SCOPE_PARTITIONS}-partition cap; a source with more divisions than that is grouped coarser to fit.`);
+    if (gaps.unassigned.length) log(`scope plan left ${gaps.unassigned.length} anchor(s) unassigned: ${gaps.unassigned.join(", ")}.`);
+    if (gaps.duplicated.length) log(`scope plan assigned ${gaps.duplicated.length} anchor(s) to more than one partition: ${gaps.duplicated.map((d) => `${d.anchor} (${d.ids.join(", ")})`).join(", ")}.`);
+    if (gaps.foreign.length) log(`scope plan partitions list ${gaps.foreign.length} anchor(s) outside its anchor list: ${gaps.foreign.join(", ")}.`);
+    Object.assign(composition, { partitions: n, rationale: plan.rationale, unassigned_anchors: gaps.unassigned });
+    outcome = await composeScope(plan, gaps);
+    composition.uncovered_anchors = outcome.uncoveredAnchors;
+  }
+  composition.agents_run = agentsRun;
+  const { result: scope, critique } = outcome;
   if (!scope) {
     log(`scope draft agent returned no result for ${slug} — nothing written.`);
-    return { stage: "scope", error: "draft agent returned no result" };
+    return { stage: "scope", error: "draft agent returned no result", composition };
   }
-  log(`scope done for ${slug}: ${scope.open_questions.length} open question(s) for review; ${verdictNote(critique)}.`);
-  return { stage: "scope", scope, critique };
+  log(`scope done for ${slug}: ${scope.open_questions.length} open question(s) for review; ${verdictNote(critique)}; composition ${composition.mode}${composition.partitions ? ` (${composition.partitions} partition(s))` : ""}, ${composition.agents_run} agent(s) run.`);
+  return { stage: "scope", scope, critique, composition };
 }
 
 // --- Spec: draft <specs_dir>/<slug>.md against the template ---
 // Conformed to <specs_dir>/spec-template.md.
+//
+// A compose round plans its own composition before anything is drafted. One drafter holding a
+// large scope writes the whole design and phase plan from one context, and drops commitments
+// without saying so. So a plan agent first reads the scope and fixes the shared frame: the
+// scope's goals as anchors, the phase outline (titles, routing, dependencies, goals delivered),
+// the core principle, and the interfaces partitions must agree on. It then partitions the
+// anchors, phases, and design elements.
+//
+// There is one compose path, and it scales with the plan. A small scope gets one partition and
+// so one drafter; a large one gets up to MAX_SPEC_PARTITIONS. Each drafter returns its design
+// elements, current state, and full phase blocks as fragments. One synthesizer writes the file.
+// Parallel lens critics then audit it: the template, each partition's phases as their narrowest
+// reader sees them, each partition's scope fidelity, and cross-partition coherence. A dead plan
+// agent ends the stage with an error rather than drafting with no frame. A feedback round is
+// unchanged.
 if (stage === "spec") {
   phase("Spec");
-  const { result: spec, critique } = await refine(
-    architect,
-    `AS. ${roleOf(architect)}
-
-     OBSERVE. Read ${SPECS}/${slug}-scope.md as the commitments this spec elaborates. Its
-     ## Goals and ## Non-Goals bind. Read ${SPECS}/${slug}-triage.md as the spec's verified
-     facts.
-
-     CONSIDERING. Use ${SPECS}/spec-template.md as the artifact's shape and per-section rules.
-     The template also says who reads each phase block. The dev agent gets #### Scope inlined as
-     its boundary. The criteria checker gets #### Acceptance Criteria alone. The checker's
-     verdict halts every later phase. ${openRules("the scope's ## Files Affected or any file your design adds")}
-     Use the working tree.
-
-     ORDER.
-     1. Scope -> the problem statement and the files and behaviour the work touches.
-     2. Those files and behaviour -> goals. Write one goal per committed outcome. Keep the goals
-        faithful to the scope's ## Goals.
-     3. Goals -> non-goals and boundaries. Keep them faithful to the scope's ## Non-Goals.
-     4. Scope -> Current State. Anchor it at path and symbol.
-     5. Anchors -> Proposed Design. State the core principle first. Put the elements in
-        dependency order.
-     6. Design -> ## Invariance. Give one independent reframing. State the claim that survives
-        it. Name one concrete falsifier on ${SURFACE}.
-     7. Design -> the phased ## Implementation Plan. Each phase's Agent routing line carries exactly
-        one bare agent name from this list: ${ROUTABLE.join(", ")}. Each phase lists Scope IN and
-        OUT as enumerated paths. Each phase has co-located Tests. Each phase's Acceptance Criteria
-        are adjudicable from their own text plus the tree. Every test run in them is a targeted
-        selection. The full check recipe for each goal the phase delivers (the command pipeline,
-        the fixture wiring, the assertion) lands here, not in ### Goals.
-     8. The draft -> the template's Composition-Time Self-Check. Do Part A by reading what you
-        wrote. Do Part B by running it against the tree.
-
-     VALIDATE. Each phase must hold for its narrowest reader. The criteria block must hold with
-     the rest of the spec covered. The Scope block must hold as the dev agent's only boundary.
-     The whole spec must hold when asked "what did the scope authorize?". No goal may be widened
-     or narrowed silently.
-
-     OUTPUT. Write ${SPECS}/${slug}.md with Date: ${date} and Status: Draft. Put the sections
-     in template order. Delete all HTML comments. Make ## Open Questions the last section, in one
-     of its three shapes.
-     ${OQ_GUIDANCE}${SPEC_MIRROR}`,
+  const specPath = `${SPECS}/${slug}.md`;
+  const specTemplate = `${SPECS}/spec-template.md`;
+  const SPEC_CRITIQUE =
     `AS. You are an adversarial critic.
 
      OBSERVE. Read ${SPECS}/${slug}.md.
@@ -820,36 +1213,512 @@ if (stage === "spec") {
 
      VALIDATE. Every issue must name the template rule or ${c.rules_dir}/ file it rests on.
 
-     OUTPUT. Return clean and issues.`,
-    // The spec return deliberately carries no phases array: the implement stage's `phases` are
-    // always reconstructed by the orchestrator from the on-disk spec's "**Agent routing**:" lines,
-    // so a return value that could diverge from the file has nothing to feed.
-    {
-      type: "object",
-      required: ["spec_path", "open_questions"],
-      properties: {
-        spec_path: { type: "string" },
-        open_questions: OQ
+     OUTPUT. Return clean and issues.`;
+  // The spec return deliberately carries no phases array: the implement stage's `phases` are
+  // always reconstructed by the orchestrator from the on-disk spec's "**Agent routing**:" lines,
+  // so a return value that could diverge from the file has nothing to feed.
+  const SPEC_SCHEMA = {
+    type: "object",
+    required: ["spec_path", "open_questions"],
+    properties: {
+      spec_path: { type: "string" },
+      open_questions: OQ
+    }
+  };
+  // The spec is the single source of truth for implement. Its phases, routing lines, and
+  // acceptance criteria decide whether each later dev phase succeeds or halts. The plan, the
+  // partition drafters, the synthesizer, and the reviser share draftModel, so all run on the
+  // spec tier (config.models.spec, the top tier by default): together they fix the phase plan and
+  // write the acceptance criteria. By default these are the pipeline's only top-tier calls and its
+  // most valuable model spend. A subtle spec defect costs far more in failed implement phases
+  // than the draft-time premium.
+  const specOpts = { draftModel: M.spec, stageInstructions: SPEC_REVISER_CONTRACT };
+
+  const titlesOf = (group) => group.map((p) => `"${p.title}"`).join(", ");
+  const narrowestReaderCritique = (group) =>
+    `AS. You are the narrowest reader of ${group.length} phase block(s) of ${specPath}: the
+     implement-stage dev agent and criteria checker.
+
+     OBSERVE. Open ${specPath} only to extract the phase blocks titled ${titlesOf(group)}. Read
+     nothing else in the spec. Judge each block as if the rest of the file did not exist.
+
+     CONSIDERING. Use the rules in the phase-block comments of ${specTemplate}.
+     ${openRules("these phases' Scope IN")} Use the working tree.
+
+     ORDER.
+     1. The Agent routing line -> exactly one bare agent name from this list:
+        ${ROUTABLE.join(", ")}. No parenthetical, no trailing clause, no second agent, no "manual".
+     2. #### Scope IN and OUT -> enumerated repo-rooted paths, each resolving on the tree or named
+        as created.
+     3. #### Tests -> co-located, one line per IN behaviour, each naming what it catches, or the
+        covered-by or unfillable form.
+     4. #### Acceptance Criteria -> each criterion adjudicable from its own text plus the tree: no
+        "Phase N", no ## Section reference, no unnamed referent. Every test run is a targeted
+        selection, never ${WHOLE_SUITE.join("; ")}; or any invocation that collects a whole
+        suite. Every constraint on how a file changed is stated by content, not by \`git diff\`
+        against HEAD, except an empty \`git diff <path>\` or \`git diff --name-only <commit>..HEAD\`.
+
+     VALIDATE. A later checker sees only your issue text and the file. So every issue names the
+     phase heading, the block, and the template rule it rests on.
+
+     OUTPUT. Return clean and issues.`;
+
+  // The plan fixes the frame every drafter shares, because drafters run in parallel and see only
+  // the plan. Anchors are the scope's goals, so "was a goal dropped?" is a set difference. Phase
+  // titles are fixed here, so the partitions' blocks splice into one numbered plan. The phase
+  // agent enum is the same routable set the critics check routing lines against.
+  const SPEC_PLAN_SCHEMA = {
+    type: "object",
+    required: ["anchors", "core_principle", "phases", "partitions", "cross_cutting", "rationale"],
+    properties: {
+      anchors: { ...STRINGS, description: "Every scope ## Goals entry as \"G<n>\", n its number in the scope, every one. Add \"OQ<n>\" only for a closed scope ## Open Questions entry whose ruling binds the spec and lands in no goal." },
+      core_principle: { type: "string", description: "The Proposed Design's core principle, one paragraph." },
+      phases: {
+        type: "array", minItems: 1,
+        items: {
+          type: "object",
+          required: ["title", "agent", "goal", "depends_on", "anchors"],
+          properties: {
+            title:      { type: "string", description: "The heading text after \"### \", exactly \"Phase <n>: <Short Imperative Name>\", n counting from 1 in dependency order." },
+            agent:      { enum: ROUTABLE },
+            goal:       { type: "string", description: "One sentence: what is true after this phase that was not true before." },
+            depends_on: { type: "string", description: "The earlier phase titles it depends on, or \"None\"." },
+            anchors:    { ...STRINGS, description: "The anchors this phase delivers, wholly or in part." }
+          }
+        }
+      },
+      partitions: {
+        type: "array", minItems: 1, maxItems: MAX_SPEC_PARTITIONS,
+        items: {
+          type: "object",
+          required: ["id", "title", "anchors", "phases", "design_elements", "source_sections", "surfaces"],
+          properties: {
+            id:              S,
+            title:           S,
+            anchors:         { ...STRINGS, description: "The anchors this partition owns. Each anchor is owned by exactly one partition." },
+            phases:          { ...STRINGS, description: "Titles of the phases this partition drafts, exactly as in phases. Each phase belongs to exactly one partition." },
+            design_elements: { ...STRINGS, description: "Headings of the ### Proposed Design subsections this partition writes." },
+            source_sections: { ...STRINGS, description: "What the drafter must read in full: the scope goals by number, and each source document section they cite, with its path." },
+            surfaces:        { ...STRINGS, description: "Repo paths or directories this partition's phases touch." }
+          }
+        }
+      },
+      cross_cutting: {
+        type: "array",
+        description: "Decisions and interfaces more than one partition must agree on: names, signatures, data layouts, constants, ordering. anchor is a short label. why states the contract and the partitions it binds.",
+        items: { type: "object", required: ["anchor", "why"], properties: { anchor: S, why: S } }
+      },
+      rationale: { type: "string", description: "Why this partition count and grouping." }
+    }
+  };
+  const SPEC_PLAN =
+    `AS. ${roleOf(architect)} You plan how the spec for workstream "${slug}" is composed. You
+     write no file.
+
+     OBSERVE. Read ${SPECS}/${slug}-scope.md in full. Its ## Goals and ## Non-Goals bind the
+     spec, and every closed ## Open Questions entry is settled input. Read
+     ${SPECS}/${slug}-triage.md as the verified facts. Read the source documents the scope cites
+     where you need them to place a commitment. Use the working tree.
+
+     CONSIDERING. One drafter writes each partition's design elements and full phase blocks, and
+     a synthesizer merges them into ${specPath} per ${specTemplate}. A drafter that holds more
+     than it can verify drops commitments without saying so. Drafters work in parallel and see
+     only this plan, so the plan carries everything two drafters must agree on. You may plan at
+     most ${MAX_SPEC_PARTITIONS} partitions. Each phase routes to exactly one agent from this
+     list: ${ROUTABLE.join(", ")}.
+
+     ORDER.
+     1. Scope -> anchors. Every ## Goals entry becomes "G<n>". Add "OQ<n>" only for a closed
+        question whose ruling lands in no goal.
+     2. Anchors -> the design's core principle.
+     3. Anchors -> the phase outline in dependency order, per the template's Implementation Plan
+        rules. Each phase leaves the system working, routes to exactly one agent, and names the
+        anchors it delivers. Every anchor is delivered by some phase, unless it is design-only by
+        its nature.
+     4. Phases -> partitions. Group dependency-adjacent phases on shared surfaces, so one drafter
+        can hold its partition's scope goals, source sections, and surfaces in full. A scope small
+        enough for one drafter gets exactly one partition.
+     5. Each anchor -> exactly one owning partition, normally the one whose phases deliver it.
+        Each phase -> exactly one partition. Each Proposed Design subsection -> exactly one
+        partition's design_elements.
+     6. Everything two partitions must agree on -> cross_cutting: the interface, name, layout,
+        constant, or ordering, each with its contract and the partitions it binds.
+     7. Partition count -> rationale.
+
+     VALIDATE. Every anchor appears in exactly one partition. Every phase appears in exactly one
+     partition. Phase numbers run 1..n in dependency order with no gap. No phase depends on a
+     later one. No phase reaches a scope ## Non-Goals entry.
+
+     OUTPUT. Return the plan.`;
+
+  const SECTIONS = ANCHORED({ heading: S, body_md: S }, ["heading", "body_md"]);
+  const SPEC_FRAGMENT_SCHEMA = {
+    type: "object",
+    required: ["current_state", "design_elements", "boundaries", "alternatives", "terminology", "phases", "standards", "interface_notes", "open_questions", "no_spec_consequence"],
+    properties: {
+      current_state:   SECTIONS,
+      design_elements: SECTIONS,
+      boundaries: { type: "object", required: ["affects", "does_not_affect"], properties: { affects: STRINGS, does_not_affect: STRINGS } },
+      alternatives: { type: "array", items: { type: "object", required: ["heading", "body_md"], properties: { heading: S, body_md: S } } },
+      terminology:  { type: "array", items: { type: "object", required: ["term", "definition"], properties: { term: S, definition: S } } },
+      phases: ANCHORED({
+        title:   S,
+        body_md: { type: "string", description: "Everything under the phase heading: **Goal**, **Agent routing**, **Depends on**, #### Scope, #### Tasks, #### Tests, #### Acceptance Criteria." }
+      }, ["title", "body_md"]),
+      standards: { type: "array", items: { type: "object", required: ["doc", "section", "applies_to"], properties: { doc: S, section: S, applies_to: S } } },
+      interface_notes: { ...STRINGS, description: "What this partition assumes from, or provides to, another partition beyond the plan's cross-cutting decisions." },
+      open_questions: ANCHORED(OQ.items.properties, OQ.items.required),
+      no_spec_consequence: { type: "array", items: { type: "object", required: ["anchor", "reason"], properties: { anchor: S, reason: S } } }
+    }
+  };
+  const quoted = (titles) => titles.map((t) => `"${t}"`).join(", ");
+  const outlineBlock = (plan) => {
+    const owner = (t) => plan.partitions.find((p) => p.phases.includes(t))?.id || "no partition";
+    return `--- phase outline ---\n${bullets(plan.phases.map((ph) => `${ph.title} | ${ph.agent} | depends on: ${ph.depends_on} | delivers: ${ph.anchors.join(", ") || "none"} | drafted by: ${owner(ph.title)} | ${ph.goal}`))}\n--- end phase outline ---`;
+  };
+  const principleBlock = (plan) => `--- core principle ---\n${plan.core_principle}\n--- end core principle ---`;
+
+  const specPartitionDraft = (p, plan) =>
+    `AS. ${roleOf(architect)} You draft partition "${p.id}: ${p.title}" of the spec for workstream
+     "${slug}". A synthesizer merges every partition's fragments into ${specPath}.
+
+     OBSERVE. Read ${SPECS}/${slug}-scope.md: in full the ## Goals entries for your anchors, all
+     of ## Non-Goals, the ## Files Affected entries on your surfaces, and every closed
+     ## Open Questions entry. Read these in full: ${p.source_sections.join("; ")}. Read
+     ${SPECS}/${slug}-triage.md for verified facts. The phase outline, core principle, and
+     cross-cutting decisions below bind you. Other partitions draft the other phases in parallel
+     against the same plan.
+
+     CONSIDERING. Your anchors are ${p.anchors.join(", ") || "none"}. Your phases are
+     ${quoted(p.phases) || "none"}. Your Proposed Design subsections are
+     ${p.design_elements.join("; ") || "none"}. Your surfaces are ${p.surfaces.join(", ")}. Use
+     ${specTemplate} for what each section and each phase block must be. The template says who
+     reads each phase block. The dev agent gets #### Scope inlined as its boundary. The criteria
+     checker gets #### Acceptance Criteria alone, and its verdict halts every later phase.
+     ${openRules("your surfaces")} Use the working tree. Acceptance criteria obey the implement
+     stage's test policy:\n${SCOPED_TESTS}
+
+     ORDER.
+     1. Each anchor -> the scope goal text, and the source text it cites.
+     2. Your surfaces -> Current State subsections anchored at path and symbol.
+     3. Anchors -> your Proposed Design subsections, consistent with the core principle and every
+        cross-cutting decision. Approaches you rejected -> alternatives.
+     4. Each of your phases -> its full block, with the plan's title, Agent routing, and Depends on
+        unchanged: **Goal**; **Agent routing**; **Depends on**; #### Scope with IN and OUT as
+        enumerated repo-rooted paths; #### Tasks; #### Tests, one line per IN behaviour; and
+        #### Acceptance Criteria, each criterion adjudicable from its own text plus the tree and
+        carrying the full check recipe for each goal the phase delivers, every test run a
+        targeted selection.
+     5. Anything you assume from or provide to another partition beyond the cross-cutting
+        decisions -> interface_notes.
+     6. Each anchor -> at least one phase or open question whose anchors list it, or a
+        no_spec_consequence entry that says why the spec carries nothing for it.
+     7. Every path, symbol, and test you name -> resolved against the tree, or named as created.
+
+     VALIDATE. Each phase block holds for its narrowest reader. No item widens or narrows a scope
+     goal or reaches a scope non-goal. No item contradicts a cross-cutting decision. No phase
+     number appears in an identifier, filename, comment, or docstring.
+
+     OUTPUT. Do not write or edit any file. The synthesizer alone writes ${specPath}, and a
+     second writer would lose its updates. Return the fragments. Each phase's title is character
+     for character the plan's. No body_md carries an HTML comment.
+     ${OQ_GUIDANCE}
+     ${outlineBlock(plan)}
+     ${principleBlock(plan)}
+     ${crossCuttingBlock(plan)}`;
+
+  const specSynthesize = (plan, fragments, gaps) =>
+    `AS. ${roleOf(architect)} You write the spec for workstream "${slug}" from the fragments of
+     ${plan.partitions.length} partition drafter(s).
+
+     OBSERVE. Read ${SPECS}/${slug}-scope.md. Its ## Goals and ## Non-Goals bind. Read
+     ${SPECS}/${slug}-triage.md as the verified facts. Read the plan and the fragments below.
+     Each fragment carries the partition it came from and the anchors every item serves.
+
+     CONSIDERING. Use ${specTemplate} as the artifact's shape and per-section rules. The phase
+     blocks are the drafters' work, written for their narrowest readers. Splice them verbatim.
+     Change a phase block only to reconcile it with another partition's interface or a
+     cross-cutting decision, and then only the lines the conflict touches. The known gaps below
+     are anchors or phases no fragment covers, or that the plan assigned to no partition or to
+     more than one. For each gap, read the scope and the source it cites, then land it. Write a
+     missing phase in full from the plan's outline. Land an anchor in a phase, a goal, or an open
+     question. Never drop a gap silently.
+
+     ORDER.
+     1. Scope -> ## Executive Summary, ### Goals, ### Non-Goals, and ### Dependencies, faithful to
+        the scope's ## Goals, ## Non-Goals, and ## Dependencies.
+     2. Fragments -> ## Terminology, merged and deduplicated.
+     3. Fragments -> ## Current State, its subsections merged, then ### Problems Summary.
+     4. The core principle and the design elements -> ## Proposed Design: ### Core Principle
+        first, then the elements in dependency order, then ### System Boundaries merged from every
+        fragment's boundaries.
+     5. Fragments -> ## Alternatives Considered, merged.
+     6. The design -> ## Invariance. Give one independent reframing. State the claim that survives
+        it. Name one concrete falsifier on ${SURFACE}.
+     7. Phase blocks -> ## Implementation Plan, in the plan's order, each under its plan title.
+        Where two partitions' interface_notes disagree, reconcile the lines the disagreement
+        touches, or raise it as an open question. Do not settle a design conflict silently.
+     8. Fragments -> ## Standards References, merged.
+     9. Open questions -> merged and numbered in ## Open Questions, or the explicit no-questions
+        sentence.
+     10. The draft -> the template's Composition-Time Self-Check. Do Part A by reading what you
+        wrote. Do Part B for the sections you wrote yourself.
+
+     VALIDATE. The whole spec must hold when asked "what did the scope authorize?". No goal is
+     widened or narrowed silently. The artifact names no partition and carries no trace section;
+     the template allows neither.
+
+     OUTPUT. Write ${specPath} with Date: ${date} and Status: Draft. Put the sections in template
+     order. Delete all HTML comments. Make ## Open Questions the last section, in one of its
+     three shapes.
+     ${OQ_GUIDANCE}${SPEC_MIRROR}
+     ${outlineBlock(plan)}
+     ${principleBlock(plan)}
+     ${crossCuttingBlock(plan)}
+     ${gapsBlock(gaps)}
+     --- fragments ---
+     ${JSON.stringify(fragments, null, 2)}
+     --- end fragments ---`;
+
+  const specFidelityCritique = (p, plan, gaps) =>
+    `AS. You are a scope-fidelity critic for partition "${p.id}: ${p.title}" of the spec for
+     workstream "${slug}".
+
+     OBSERVE. Read ${SPECS}/${slug}-scope.md: the ## Goals entries for the anchors below, all of
+     ## Non-Goals, and the closed ## Open Questions entries. Read these: ${p.source_sections.join("; ")}.
+     Read ${specPath}: ### Goals, ## Proposed Design, and ${p.phases.length ? `the phases titled ${quoted(p.phases)}` : "whichever phases deliver the anchors below"}.
+
+     CONSIDERING. The anchors to check are ${p.anchors.join(", ")}. "G<n>" is scope goal n.
+     "OQ<n>" is closed scope question n. The scope binds the spec. A divergence the spec raises as
+     a numbered ## Open Questions entry is not silent. The known gaps below were found before the
+     spec was written. Check those that name one of your anchors or phases.
+
+     ORDER.
+     1. Each anchor -> the scope text that states it.
+     2. Scope text -> the spec ### Goals entry that carries it, and the phase whose Scope IN and
+        Acceptance Criteria deliver it.
+     3. An anchor that lands nowhere, or lands widened, narrowed, or contradicted -> an issue. An
+        anchor the design carries but no phase delivers -> an issue.
+     4. Each of your phases -> its Scope IN reaches no scope ## Non-Goals entry.
+     5. Each cross-cutting decision -> no line of your phases or design contradicts it.
+
+     VALIDATE. A later checker sees only your issue text and the spec, never this partition. So
+     every issue names the scope goal or non-goal by number, what the scope commits to in one
+     sentence, and the spec section and phase heading where it lands or is missing. Do not audit
+     template form or single-phase readability. Other critics own those.
+
+     OUTPUT. Return clean and issues.
+     ${crossCuttingBlock(plan)}
+     ${gapsBlock(gaps)}`;
+
+  const specCoherenceCritique = (plan) =>
+    `AS. You are a cross-partition coherence critic. ${specPath} was drafted by
+     ${plan.partitions.length} drafter(s) in parallel and merged by a synthesizer, so its seams
+     are where it breaks.
+
+     OBSERVE. Read ${specPath} in full. Read ${SPECS}/${slug}-scope.md ## Non-Goals. Use the
+     working tree.
+
+     CONSIDERING. The plan's partitions and cross-cutting decisions are below.
+
+     ORDER.
+     1. Each **Depends on** line -> names only earlier phases. Each phase's Scope IN uses only
+        what earlier phases or the tree provide.
+     2. Each name, signature, data layout, constant, and ordering a cross-cutting decision fixes
+        -> used identically in every section and phase that names it.
+     3. Each file in more than one phase's Scope IN -> the phases' changes to it are compatible and
+        ordered, and no later phase undoes an earlier one.
+     4. ## Terminology, ## Proposed Design, and the phases -> one term per concept.
+     5. Each scope ## Non-Goals entry -> no goal, design element, or phase Scope IN reaches it.
+     6. ## Invariance -> present, with a reframing, a surviving claim, and a concrete falsifier,
+        or "not yet identified" with a matching ## Open Questions entry.
+     7. Failures -> issues.
+
+     VALIDATE. Each issue names both sides of the seam: the two sections or phase headings and the
+     conflicting lines. Do not audit template form, single-phase readability, or per-goal
+     fidelity. Other critics own those.
+
+     OUTPUT. Return clean and issues.
+     --- partitions ---\n${bullets(plan.partitions.map((p) => `${p.id}: ${p.title}, phases ${quoted(p.phases) || "none"}`))}\n--- end partitions ---
+     ${crossCuttingBlock(plan)}`;
+
+  // Plain-JS check of the plan's phase outline and phase assignment. Each line goes to the
+  // synthesizer and the critics as a known gap. `unowned` phases have no drafter, so the
+  // synthesizer writes them and a narrowest-reader lens of their own audits them.
+  const phaseGaps = (plan) => {
+    const owners = new Map();
+    for (const p of plan.partitions) for (const t of new Set(p.phases)) owners.set(t, [...(owners.get(t) || []), p.id]);
+    const lines = [];
+    const seen = new Set();
+    plan.phases.forEach((ph, i) => {
+      const t = ph.title;
+      if (seen.has(t)) lines.push(`phase "${t}": the plan's outline lists it more than once.`);
+      seen.add(t);
+      const m = /^Phase (\d+): \S/.exec(t);
+      if (!m || Number(m[1]) !== i + 1) lines.push(`phase "${t}": its title is not "Phase ${i + 1}: <name>" at outline position ${i + 1}.`);
+      if (!owners.has(t)) lines.push(`phase "${t}": the plan assigned it to no partition, so no drafter wrote it.`);
+      else if (owners.get(t).length > 1) lines.push(`phase "${t}": the plan assigned it to partitions ${owners.get(t).join(" and ")}. Keep one block for it.`);
+    });
+    for (const t of owners.keys()) if (!seen.has(t)) lines.push(`phase "${t}": a partition lists it, but the plan's phase outline does not.`);
+    return { lines, unowned: [...seen].filter((t) => !owners.has(t)) };
+  };
+
+  const composePartitioned = async (plan, gaps, pGaps) => {
+    const kit = refineKit(architect, SPEC_SCHEMA, "spec", "Spec", specPath, specTemplate, specOpts);
+    const fragments = await parallel(plan.partitions.map((p) => () => runAgent(
+      specPartitionDraft(p, plan),
+      { label: `spec:draft:${p.id}`, phase: "Spec", agentType: architect, schema: SPEC_FRAGMENT_SCHEMA, ...kit.draftOpts }
+    )));
+    plan.partitions.forEach((p, i) => {
+      if (!fragments[i]) log(`spec partition "${p.id}" drafter returned no result; its ${p.anchors.length} anchor(s) and ${p.phases.length} phase(s) go to the synthesizer and its critics as known gaps.`);
+    });
+
+    // An anchor counts as covered when a fragment of a partition that owns it delivers it in a
+    // phase, raises it as an open question, or explains it in no_spec_consequence. A design
+    // element alone does not count: a goal no phase delivers is never implemented.
+    const coveredBy = fragments.map((f) => {
+      const got = new Set();
+      if (!f) return got;
+      for (const key of ["phases", "open_questions"]) for (const item of f[key]) for (const an of item.anchors) got.add(an);
+      for (const n of f.no_spec_consequence) got.add(n.anchor);
+      return got;
+    });
+    const owners = new Map();
+    plan.partitions.forEach((p, i) => { for (const an of new Set(p.anchors)) owners.set(an, [...(owners.get(an) || []), i]); });
+    const uncovered = [];
+    for (const [an, idx] of owners) {
+      if (idx.some((i) => coveredBy[i].has(an))) continue;
+      uncovered.push({ anchor: an, line: `${an} (partition ${idx.map((i) => plan.partitions[i].id).join(", ")}): ${idx.every((i) => !fragments[i]) ? "its partition's drafter returned no result" : "no phase or open question from its partition lists it, and no no_spec_consequence entry explains it"}.` });
+    }
+    // Each planned phase must come back from a partition that owns it, under its exact title.
+    const planned = new Set(plan.phases.map((ph) => ph.title));
+    const missingPhases = [];
+    const strays = [];
+    plan.partitions.forEach((p, i) => {
+      const f = fragments[i];
+      for (const t of new Set(p.phases)) {
+        if (!planned.has(t)) continue; // a foreign title is already a plan gap
+        if (f && f.phases.some((ph) => ph.title === t)) continue;
+        const otherOwner = plan.partitions.some((q, j) => j !== i && q.phases.includes(t) && fragments[j]?.phases.some((ph) => ph.title === t));
+        if (otherOwner || missingPhases.some((m) => m.title === t)) continue;
+        missingPhases.push({ title: t, line: `phase "${t}" (partition ${p.id}): ${f ? "its drafter returned no block with this exact title" : "its drafter returned no result"}. Write it in full from the plan's outline.` });
       }
-    },
-    "spec", "Spec", `${SPECS}/${slug}.md`, `${SPECS}/spec-template.md`,
-    // The spec is the single source of truth for implement. Its phases, routing lines, and
-    // acceptance criteria decide whether each later dev phase succeeds or halts. The drafter and
-    // the reviser share draftModel, so both run on the spec tier (config.models.spec, the top
-    // tier by default). By default these are the pipeline's only top-tier calls and its most
-    // valuable model spend. A subtle spec defect costs far more in failed implement phases than
-    // the draft-time premium.
-    { draftModel: M.spec, feedback, stageInstructions: SPEC_REVISER_CONTRACT }
-  );
-  if (!spec) {
-    log(`spec draft agent returned no result for ${slug} — nothing written.`);
-    return { stage: "spec", error: "draft agent returned no result" };
+      if (f) {
+        const mine = new Set(p.phases);
+        for (const ph of f.phases) if (!mine.has(ph.title)) strays.push(`partition "${p.id}" returned a phase block titled "${ph.title}", which is not one of its planned phases. Place it under the plan title it belongs to, or drop it where another partition owns that phase.`);
+      }
+    });
+    if (uncovered.length) log(`spec: ${uncovered.length} anchor(s) uncovered after drafting: ${uncovered.map((u) => u.anchor).join(", ")}. Passed to the synthesizer and the fidelity critics.`);
+    if (missingPhases.length) log(`spec: ${missingPhases.length} planned phase(s) came back from no drafter: ${quoted(missingPhases.map((m) => m.title))}. The synthesizer writes them from the outline.`);
+    if (strays.length) log(`spec: ${strays.length} phase block(s) came back under a title their partition does not own.`);
+    const knownGaps = [...planGapLines(gaps), ...pGaps.lines, ...uncovered.map((u) => u.line), ...missingPhases.map((m) => m.line), ...strays];
+
+    const tagged = fragments
+      .map((f, i) => f && { partition: plan.partitions[i].id, title: plan.partitions[i].title, ...f })
+      .filter(Boolean);
+    const result = await runAgent(
+      specSynthesize(plan, tagged, knownGaps),
+      { label: "spec:synthesize", phase: "Spec", agentType: architect, schema: SPEC_SCHEMA, ...kit.draftOpts }
+    );
+    const uncoveredAnchors = [...uncovered.map((u) => u.anchor), ...missingPhases.map((m) => `phase: ${m.title}`)];
+    if (!result) return { result: null, critique: null, uncoveredAnchors };
+
+    // Unassigned anchors belong to no partition, and unowned phases had no drafter, so each gets a
+    // lens of its own rather than going unchecked.
+    const fidelityTargets = [...plan.partitions];
+    if (gaps.unassigned.length) {
+      fidelityTargets.push({
+        id: "unassigned", title: "anchors the plan assigned to no partition", phases: [],
+        source_sections: [`${SPECS}/${slug}-scope.md ## Goals; locate each anchor there`],
+        anchors: gaps.unassigned
+      });
+    }
+    const readerGroups = plan.partitions
+      .filter((p) => p.phases.length)
+      .map((p) => ({ id: p.id, group: p.phases.map((t) => ({ title: t })) }));
+    if (pGaps.unowned.length) readerGroups.push({ id: "unassigned", group: pGaps.unowned.map((t) => ({ title: t })) });
+
+    const lenses = [
+      {
+        lens: "template", run: () => kit.critic(SPEC_CRITIQUE, "template"),
+        fallback: `The template critic returned no result, so this lens is unaudited. Audit ${specPath} against every Part A bullet of ${specTemplate}'s Composition-Time Self-Check.`
+      },
+      ...readerGroups.map(({ id, group }) => ({
+        lens: `phases:${id}`, run: () => kit.critic(narrowestReaderCritique(group), `phases:${id}`),
+        fallback: `The narrowest-reader critic for phases ${titlesOf(group)} returned no result, so those blocks are unaudited. Check each one's Agent routing line, Scope IN and OUT paths, Tests, and Acceptance Criteria against ${specTemplate}'s phase-block rules, reading only that block.`
+      })),
+      ...fidelityTargets.map((p) => ({
+        lens: `fidelity:${p.id}`, run: () => kit.critic(specFidelityCritique(p, plan, knownGaps), `fidelity:${p.id}`),
+        fallback: `The scope-fidelity critic for partition "${p.id}" returned no result, so its anchors are unaudited. Confirm each of ${p.anchors.join(", ")} (scope goal G<n> or closed question OQ<n> in ${SPECS}/${slug}-scope.md) lands in ${specPath} as a goal delivered by a phase, or as an open question, neither widened nor narrowed.`
+      })),
+      {
+        lens: "coherence", run: () => kit.critic(specCoherenceCritique(plan), "coherence"),
+        fallback: `The coherence critic returned no result, so this lens is unaudited. Check that every Depends on line in ${specPath} names only earlier phases, every cross-cutting name and layout is used identically, no two phases' Scope IN changes to one file conflict, no scope ## Non-Goals entry is reached, and ## Invariance carries a falsifier.`
+      }
+    ];
+    log(`spec: ${lenses.length} lens critic(s): ${lenses.map((l) => l.lens).join(", ")}.`);
+    const verdicts = await parallel(lenses.map((l) => l.run));
+    const critique = mergeCritiques(lenses.map((l, i) => ({ lens: l.lens, critique: verdicts[i], fallback: l.fallback })));
+    log(`spec lens critics: ${lensSummary(lenses, verdicts)}.`);
+
+    const loop = await reviseLoop(kit, result, critique);
+    if (loop.rounds === 2 && loop.critique && !loop.critique.clean) {
+      log(`spec revise loop stopped at its 2-round cap with ${loop.critique.issues.length} issue(s) still flagged.`);
+    }
+    return { ...loop, uncoveredAnchors };
+  };
+
+  const composition = { mode: "feedback", partitions: null, rationale: null, phases_planned: 0, unassigned_anchors: [], uncovered_anchors: [], agents_run: 0 };
+
+  let outcome;
+  if (feedback) {
+    // Structural refine: one reviser + one critic, unchanged. refine() reads no draft prompt on
+    // the feedback path, so none is passed.
+    outcome = await refine(architect, null, SPEC_CRITIQUE, SPEC_SCHEMA, "spec", "Spec", specPath, specTemplate, { ...specOpts, feedback });
+  } else {
+    composition.mode = "partitioned";
+    // The plan is drafter-class work on the spec's own tier: it fixes the phase outline and the
+    // interfaces every drafter builds against.
+    const plan = await runAgent(
+      SPEC_PLAN,
+      { label: "spec:plan", phase: "Spec", agentType: architect, schema: SPEC_PLAN_SCHEMA, model: model || specOpts.draftModel }
+    );
+    if (!plan) {
+      // Drafting without a plan would bring back the one-context draft this path exists to avoid.
+      log(`spec plan agent returned no result for ${slug} — nothing written.`);
+      composition.agents_run = agentsRun;
+      return { stage: "spec", error: "plan agent returned no result; nothing written. Re-run the stage.", composition };
+    }
+    plan.anchors = [...new Set(plan.anchors)];
+    uniquePartitionIds(plan, "spec");
+    const gaps = planGaps(plan);
+    const pGaps = phaseGaps(plan);
+    const n = plan.partitions.length;
+    log(`spec plan for ${slug}: ${plan.anchors.length} anchor(s), ${plan.phases.length} phase(s), ${n} partition(s) (cap ${MAX_SPEC_PARTITIONS}). ${plan.rationale}`);
+    if (n === MAX_SPEC_PARTITIONS) log(`spec plan hit the ${MAX_SPEC_PARTITIONS}-partition cap; a scope with more divisions than that is grouped coarser to fit.`);
+    if (gaps.unassigned.length) log(`spec plan left ${gaps.unassigned.length} anchor(s) unassigned: ${gaps.unassigned.join(", ")}.`);
+    if (gaps.duplicated.length) log(`spec plan assigned ${gaps.duplicated.length} anchor(s) to more than one partition: ${gaps.duplicated.map((d) => `${d.anchor} (${d.ids.join(", ")})`).join(", ")}.`);
+    if (gaps.foreign.length) log(`spec plan partitions list ${gaps.foreign.length} anchor(s) outside its anchor list: ${gaps.foreign.join(", ")}.`);
+    for (const line of pGaps.lines) log(`spec plan: ${line}`);
+    Object.assign(composition, {
+      partitions: n, rationale: plan.rationale, phases_planned: plan.phases.length,
+      unassigned_anchors: [...gaps.unassigned, ...pGaps.unowned.map((t) => `phase: ${t}`)]
+    });
+    outcome = await composePartitioned(plan, gaps, pGaps);
+    composition.uncovered_anchors = outcome.uncoveredAnchors;
   }
-  log(`spec drafted for ${slug} at ${spec.spec_path}: ${spec.open_questions.length} open question(s) for review; ${verdictNote(critique)}.`);
-  return { stage: "spec", spec, critique };
+  composition.agents_run = agentsRun;
+  if (!outcome.result) {
+    log(`spec draft agent returned no result for ${slug} — nothing written.`);
+    return { stage: "spec", error: "draft agent returned no result", composition };
+  }
+  const spec = outcome.result;
+  const { critique } = outcome;
+  log(`spec drafted for ${slug} at ${spec.spec_path}: ${spec.open_questions.length} open question(s) for review; ${verdictNote(critique)}; composition ${composition.mode}${composition.mode === "partitioned" ? ` (${composition.partitions} partition(s), ${composition.phases_planned} phase(s) planned)` : ""}, ${composition.agents_run} agent(s) run.`);
+  return { stage: "spec", spec, critique, composition };
 }
 
-// --- Implement: each spec phase, routed (impl tier), criteria-checked (check tier), reviewed (architect on the review tier), in sequence ---
+// --- Implement: each spec phase, routed (impl tier), criteria-checked (check tier), reviewed (architect on the review tier), committed (commit tier), in sequence ---
 // Verify is split into two calls: a criteria check and an architect review.
 if (stage === "implement") {
   phase("Implement");
@@ -882,6 +1751,11 @@ if (stage === "implement") {
   // halts at the first phase whose criteria check fails, whose architect review is unsound, or
   // whose agents die. It records the failure and returns `halted` naming that phase. The human
   // then decides whether to refine or repair before any later phase spends tokens on a broken tree.
+  //
+  // Each phase that passes both checks is committed before the next phase starts, so the PR
+  // carries one commit per phase and a halted phase's work is the only uncommitted work on the
+  // tree. Every phase commit carries a `Spec-Phase: <slug> / <title>` trailer. After /resume, that
+  // trailer is the pass record that the command doc's Step 3 re-entry slicing reads from git log.
   const results = [];
   let halted = null;
   const GENERIC_GUARD = "a source-shape guard that mechanizes an invariant no runtime test can observe";
@@ -916,9 +1790,9 @@ if (stage === "implement") {
 
        CONSIDERING. Use the \`${c.rules_dir}/*.md\` whose globs intersect this phase's
        files-affected set, if that directory exists. Do not touch any file outside the phase's
-       scope. Do not create, switch, or rename branches. Do not use git worktrees. Do not use git
-       stash. Do not run the whole test suite. Work on the current branch exactly as it is
-       checked out.
+       scope. Do not create, switch, or rename branches. Do not commit or stage. The workflow
+       commits the phase after it is verified. Do not use git worktrees. Do not use git stash. Do
+       not run the whole test suite. Work on the current branch exactly as it is checked out.
 
        ORDER.
        1. The phase's declared prerequisites -> a go or no-go decision before any write.
@@ -1089,12 +1963,75 @@ if (stage === "implement") {
     const concerns = review && Array.isArray(review.concerns) ? review.concerns : [];
     const blocking = concerns.filter(x => x && x.severity === "blocking");
     const sound = !!(review && review.sound) && blocking.length === 0;
-    results.push({ phase: p.title, passed: true, sound, criteria: rows, review });
+    const entry = { phase: p.title, passed: true, sound, criteria: rows, review };
+    results.push(entry);
     if (!sound) {
       halted = p.title;
       log(`implement halted at phase "${p.title}": ${review ? `architect review unsound (${blocking.length} blocking concern(s)${review.sound ? "; the review said sound=true beside a blocking concern, failed closed" : ""})` : "architect reviewer returned no result"}; later phases not run.`);
       break;
     }
+
+    // (d) Commit the verified phase. This is mechanical, so it runs on the commit tier
+    // (config.models.commit). The committer stages the whole tree except the specs directory,
+    // because this slug's artifacts are committed at ship and other workstreams' artifacts never
+    // are. It reports staged paths the phase scope does not name instead of dropping them, since
+    // an unstaged leftover would ride into the next phase's commit anyway. A failed commit
+    // (usually a pre-commit hook) halts the loop. The phase has still passed review, so re-entry
+    // does not resend it. The developer fixes and commits it by hand (command doc Step 6.3).
+    const commit = await agent(
+      `Commit the verified implementation of phase "${p.title}" of ${SPECS}/${slug}.md.
+
+       ORDER.
+       1. Run \`git add -A -- . ':(exclude)${SPECS}'\`. Never stage anything under ${SPECS}/.
+       2. Run \`git diff --cached --stat\`. If nothing is staged, return committed=false with no
+          error and stop.
+       3. List each staged path that the phase scope below does not name, either by file or by a
+          directory that contains it. Return these as "unexpected". Commit them anyway.
+       4. Read \`git diff --cached\` and the phase's section of the spec. Read
+          \`git log -10 --format=%s\` for the repository's subject convention. Write the message:
+          - Subject: 72 characters or fewer, imperative mood, in the repository's convention.
+            Where the log shows none, use a conventional commit, \`<type>(<area>): <summary>\`,
+            and pick the type from the change (feat, fix, refactor, test, docs, chore).
+          - Body: prose wrapped at 72 columns. Say what the phase changed and why, in a few
+            sentences. Do not list every file.
+          - Trailers, as the final paragraph, in this order:
+            \`Spec-Phase: ${slug} / ${p.title}\`
+            then any Co-Authored-By trailer your session's attribution instructions give.
+       5. Commit with \`git commit -F <message file>\`, writing the message file under your
+          scratchpad directory, outside the repository.
+
+       CONSIDERING. Never pass --no-verify. Never amend, reset, rebase, or switch branches. Never
+       edit a source file, including to satisfy a pre-commit hook. The code has already been
+       reviewed, and changing it here would bypass that review. If the commit fails, return
+       committed=false with the hook's or git's error output in "error".
+
+       OUTPUT. Return committed, the new commit's full SHA from \`git rev-parse HEAD\`, the
+       subject, unexpected, and error.\n--- phase scope ---\n${p.scope}\n--- end phase scope ---`,
+      {
+        label: `commit:${p.title}`, phase: "Implement", model: M.commit,
+        schema: {
+          type: "object", required: ["committed", "unexpected"],
+          properties: {
+            committed:  { type: "boolean" },
+            sha:        { type: "string" },
+            subject:    { type: "string" },
+            unexpected: { type: "array", items: { type: "string" } },
+            error:      { type: "string" }
+          }
+        }
+      }
+    );
+    entry.commit = commit;
+    if (!commit || (!commit.committed && commit.error)) {
+      halted = p.title;
+      entry.error = commit
+        ? `phase passed but its commit failed: ${commit.error}`
+        : "phase passed but the committer returned no result; check git log for whether it committed";
+      log(`implement halted at phase "${p.title}": ${entry.error}; later phases not run.`);
+      break;
+    }
+    const unexpected = Array.isArray(commit.unexpected) ? commit.unexpected : [];
+    if (unexpected.length) log(`phase "${p.title}" commit ${commit.sha} included paths outside the phase scope: ${unexpected.join(", ")}.`);
   }
   // Deferred criteria are the whole-suite claims the checker replaced with a scoped run. They are
   // exactly the debt the validate stage settles. So the count goes in the stage's summary, not
@@ -1102,14 +2039,14 @@ if (stage === "implement") {
   const deferredCount = results.reduce(
     (n, r) => n + (r.criteria || []).filter(x => x && x.deferred).length, 0
   );
-  if (!halted) log(`implement done for ${slug}: ${results.length} phase(s) implemented, criteria-checked, and reviewed${deferredCount ? `; ${deferredCount} whole-suite criterion/criteria deferred to validate` : ""}.`);
+  if (!halted) log(`implement done for ${slug}: ${results.length} phase(s) implemented, criteria-checked, reviewed, and committed${deferredCount ? `; ${deferredCount} whole-suite criterion/criteria deferred to validate` : ""}.`);
   return { stage: "implement", results, halted };
 }
 
 // --- Validate: full-suite regression gate between implement and ship ---
 // The implement stage's checker runs only the tests each acceptance criterion names, so it
-// cannot see regressions outside those tests. This stage closes that gap before any
-// commit/push/PR: one agent on the cheap validate tier runs every configured full suite and
+// cannot see regressions outside those tests. This stage closes that gap before the
+// push/PR: one agent on the cheap validate tier runs every configured full suite and
 // reports what it observed. It only reports and fixes nothing. The human decides what a failure
 // means (rewind to implement, refine, or fix directly). Re-running is idempotent, so the
 // orchestrator may validate again freely after /resume or after any further code change.

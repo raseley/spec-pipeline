@@ -33,9 +33,9 @@ command keeps it for branch and ship operations.
 |---|---|---|
 | any | | `{stage, error: "invalid config: <reason>"}`; unknown stage: `{stage, error}` |
 | triage | `{stage: "triage", triage, critique}` | dead drafter: `{stage, error}`; malformed: `{stage, error, triage: {...status: "malformed"}, critique}` |
-| scope | `{stage: "scope", scope: {scope_path, open_questions}, critique}` | `{stage, error}` |
-| spec | `{stage: "spec", spec: {spec_path, open_questions}, critique}` (never phases) | `{stage, error}` |
-| implement | `{stage: "implement", results: [{phase, passed, sound, criteria, review, error?}], halted}` | `{stage, error}` for missing or empty `phases`, missing or unknown `architect`, or a phase `agent` not in the routable roster |
+| scope | `{stage: "scope", scope: {scope_path, open_questions}, critique, composition}` | dead plan or drafter: `{stage, error, composition}` |
+| spec | `{stage: "spec", spec: {spec_path, open_questions}, critique, composition}` (never phases) | dead plan or drafter: `{stage, error, composition}` |
+| implement | `{stage: "implement", results: [{phase, passed, sound, criteria, review, commit?, error?}], halted}` | `{stage, error}` for missing or empty `phases`, missing or unknown `architect`, or a phase `agent` not in the routable roster |
 | validate | `{stage: "validate", validation: {passed, suites: [{suite, passed, summary, failures?}]}}` | `{stage, error}` (dead runner) |
 
 - `triage.status` is `routed` or `blocked` from the agent; `malformed` only from the script.
@@ -44,6 +44,12 @@ command keeps it for branch and ship operations.
   and found a blocking concern or died.
 - Each `criteria` row is `{criterion, met, deferred}`. Each `review.concerns` row is
   `{severity: "blocking"|"observation", concern, anchor}`.
+- `composition` (scope and spec) is `{mode: "partitioned"|"feedback", partitions, rationale, unassigned_anchors,
+  uncovered_anchors, agents_run}`; spec adds `phases_planned`. On a feedback round `partitions` and `rationale`
+  are `null` and both anchor lists are empty. Spec anchor entries are `G<n>`, `OQ<n>`, or `phase: <title>`.
+- `commit` is present on every phase that passed review: `{committed, sha?, subject?, unexpected, error?}`.
+  `committed: false` with no `error` means nothing was staged; with `error`, the commit failed and the phase
+  halted (its `error` says so).
 - `open_questions` entries are `{question, context, options: [{label, description}] (2-4), recommended?}`.
 
 ## 3. Coupled literals (byte-exact)
@@ -73,10 +79,11 @@ in #2 and #3 are em dashes, and that difference is load-bearing.
 | 18 | Spec Part B sub-headings `#### Grounding` and `#### Project Invariants` | spec template |
 | 19 | Artifact names `<specs_dir>/<slug>-triage.md`, `<slug>-scope.md`, `<slug>.md`; templates `triage-template.md`, `scope-template.md`, `spec-template.md` beside them | everything |
 | 20 | Unfillable forms: `**<SECTION> is unfillable.** ... Handed back as ## OUTPUT entry B<n>.` (blocking) and `... Raised as ## OUTPUT entry <n>, whose **Closes on** carries that same decision.` (non-blocking); a single underivable ORDER link `N. <link> - not derived: <why>.` | triage template, script triage prompt |
-| 21 | Agent-call labels `triage`, `triage:critic`, `triage:revise`, `scope`, `scope:critic`, `scope:revise`, `spec`, `spec:critic`, `spec:revise`, `impl:<title>`, `verify:checks:<title>`, `verify:review:<title>`, `validate:full-suite` | script |
+| 21 | Agent-call labels `triage`, `triage:critic`, `triage:revise`; `scope:plan`, `scope:draft:<partition>`, `scope:synthesize`, `scope:critic:<lens>`, `scope:critic`, `scope:revise`; `spec:plan`, `spec:draft:<partition>`, `spec:synthesize`, `spec:critic:<lens>`, `spec:critic`, `spec:revise`; `impl:<title>`, `verify:checks:<title>`, `verify:review:<title>`, `commit:<title>`, `validate:full-suite` | script |
 | 22 | Phase titles `Triage`, `Scope`, `Spec`, `Implement`, `Validate` in `meta.phases` and `phase()` | script |
 | 23 | Inline-refine rationale `selected by the developer without stated rationale` | command |
 | 24 | Removal commit message `chore(specs): remove <slug> pipeline artifacts` | command |
+| 25 | Phase-commit trailer `Spec-Phase: <slug> / <title>` (the pass record re-entry slicing reads from `git log` after `/resume`) | script implement committer, command Steps 3 and 6.3 |
 
 ## 4. The three closed-entry shapes, side by side
 

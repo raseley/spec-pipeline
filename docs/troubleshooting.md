@@ -20,7 +20,7 @@ Commands and workflows are discovered at session start. Start a new Claude Code 
 Confirm the files are at `.claude/commands/spec-pipeline.md` and `.claude/workflows/spec-pipeline.js`, and
 that the script's `meta.name` is `spec-pipeline`.
 
-### "draft agent returned no result" (or "implementation agent returned no result")
+### "draft agent returned no result" (or "plan agent returned no result", or "implementation agent returned no result")
 
 `agent()` returned `null`: the subagent was skipped or died on a terminal API error. Usual causes:
 
@@ -30,7 +30,29 @@ that the script's `meta.name` is `spec-pipeline`.
   `name: <name>` in its frontmatter, or `general-purpose`.
 - **A schema the API rejects** (see the next entry).
 
-Nothing was written for a dead drafter; re-run the stage after fixing the cause.
+Nothing was written for a dead drafter or a dead scope or spec plan agent; re-run the stage after fixing the
+cause. A single dead partition drafter does not end the stage: its anchors become known gaps that the
+synthesizer lands and the critics check, and the return lists them under `composition.uncovered_anchors`.
+
+### Scope or spec reports unassigned or uncovered anchors
+
+The plan left a commitment in no partition, or no drafter covered it. The synthesizer was told to land each
+one, and the lens critics checked it. If the final critique is clean, the gate still advances. If it is not,
+check each named anchor in the artifact and `refine:` where one was dropped. Persistent gaps on a very large
+source usually mean the plan hit its 6-partition cap; split the workstream at triage.
+
+### A scope or spec run spawned many agents
+
+That is by design for a large source: up to 6 drafters plus one lens critic per partition, capped by the
+script itself. The `composition` line reports `agents_run`. A small change plans one partition and runs a
+handful of agents.
+
+### Implement halted with "phase passed but its commit failed"
+
+The phase passed its checker and review, but `git commit` failed, almost always on a pre-commit hook. The
+committer never edits source or passes `--no-verify`, because that would bypass the review. Fix what the hook
+reported; the orchestrator then commits the phase by hand (`git add -A -- . ':(exclude)<specs_dir>'` and a
+`Spec-Phase: <slug> / <title>` trailer) and `advance` continues from the next phase.
 
 ### `input_schema does not support oneOf, allOf, or anyOf at the top level`
 
@@ -103,7 +125,7 @@ pipeline never stashes.
 
 ### We squash-merge and the spec permalink is dead
 
-A squash merge drops the implementation commit the permalink points at. Either enable merge commits or set
+A squash merge drops the spec commit the permalink points at. Either enable merge commits or set
 `ship.remove_artifacts_after_pr: false` so the artifacts merge with the PR.
 
 ### The PR body links a spec path that 404s
@@ -128,5 +150,5 @@ instead of inventing a paragraph. Re-run the stage.
 ### After `/resume`, where am I?
 
 Say `advance`. The orchestrator re-derives the stage from the files, the branch, and `gh`, and recovers the
-architect and branch prefix from the triage artifact. After an implement halt, it re-checks phases in order to
-find the first unmet one rather than guessing.
+architect and branch prefix from the triage artifact. After an implement halt, it reads the `Spec-Phase`
+trailers in `git log <base>..HEAD` to find the first phase that has not passed rather than guessing.

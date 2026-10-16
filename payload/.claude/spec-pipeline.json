@@ -87,6 +87,7 @@
     "impl": "opus",
     "check": "opus",
     "review": "opus",
+    "commit": "sonnet",
     "validate": "sonnet",
     "escalation": "fable"
   }

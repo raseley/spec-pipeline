@@ -82,8 +82,11 @@ already exist, it reports the position and treats the request as advance or refi
 **Re-entry slicing.** The script runs whatever `phases` array it receives. After a halt, the command resends
 the suffix starting at the halted phase, using the previous return's `passed: true` **and** `sound: true` as
 the pass record. A passed phase whose title, routing, Scope, or Acceptance Criteria changed since is sent
-again. With no return in memory (after `/resume`), it walks the phases in order and checks each one's
-criteria itself until the first unmet one.
+again. With no return in memory (after `/resume`), it reads the pass record from git: every passed phase was
+committed with a `Spec-Phase: <slug> / <title>` trailer, so
+`git log --format='%(trailers:key=Spec-Phase,valueonly)' <base>..HEAD` lists them, and it slices at the first
+phase in spec order with no trailer. Only for a branch whose implementation commits carry no trailers does it
+fall back to checking each phase's criteria itself until the first unmet one.
 
 ## Branch setup (Step 4)
 
@@ -98,15 +101,41 @@ implement is the spec's approval: a `Draft` spec is set to `**Status**: Final` b
 
 ## The document stages: triage, scope, spec
 
-All three run through `refine()`:
+Triage runs through `refine()`, and so do scope and spec on a feedback round:
 
 ```
 compose (no feedback):   draft ──► critic (full audit) ──► [revise ──► critic (raised issues only)] × ≤2
 feedback (structural):   revise (address every point) ──► critic (feedback points only)
 ```
 
+A scope or spec compose round plans its own composition first, then joins the same revise loop
+(`reviseLoop()`):
+
+```
+plan ──► drafter per partition (parallel, 1..6) ──► plain-JS coverage check ──► synthesizer (writes the file)
+     ──► lens critics (parallel) ──► merged critique ──► [revise ──► critic (raised issues only)] × ≤2
+```
+
+- **Plan.** Lists the source's enumerable commitments as **anchors** and assigns each to exactly one
+  partition (at most `MAX_SCOPE_PARTITIONS` / `MAX_SPEC_PARTITIONS`, both 6). A small source gets one
+  partition, so one drafter. Decisions that bind several partitions go into `cross_cutting`. A dead plan
+  agent ends the stage with `{stage, error, composition}` and nothing written.
+- **Drafters** return fragments, never the file, and every fragment item lists the anchors it serves. An
+  anchor a partition cannot land goes in `no_scope_consequence` / `no_spec_consequence` with a reason.
+- **Coverage check** (plain JavaScript, no agent): unassigned, duplicated, and foreign anchors from the plan;
+  anchors no owning fragment covers; for spec, misnumbered, unowned, missing, and stray phases. Each becomes a
+  **known gap** line that the synthesizer must land and the critics must check. None is dropped silently.
+- **Synthesizer** writes the artifact from the fragments, splicing spec phase blocks verbatim, and lands every
+  known gap. The artifact carries no anchor ids, partition names, or trace section.
+- **Lens critics** run in parallel on `models.critic`. Their verdicts merge into one critique, each issue
+  prefixed with its lens; a dead lens becomes an issue restating what it would have checked, never clean.
+- The return adds `composition`: `{mode, partitions, rationale, unassigned_anchors, uncovered_anchors,
+  agents_run}` (spec adds `phases_planned`). The gate stops when either anchor list is non-empty and the final
+  critique is not clean.
+
 - Drafter and reviser share the stage's tier (`models.triage`/`scope`/`spec`, or `args.model`), so a
-  revision is never written by a weaker model than the draft it overwrites.
+  revision is never written by a weaker model than the draft it overwrites. For scope and spec, the plan,
+  the partition drafters, and the synthesizer share it too.
 - The critic uses the same `agentType` as the drafter (same domain context) on `models.critic`.
 - Every reviser receives `OQ_GUIDANCE` and its stage's contract (mirroring, frozen frontmatter, plus
   triage's status and block-answering rules or spec's upstream binding to the scope). On compose rounds it is
@@ -142,21 +171,25 @@ The command then compares the return with the artifact's `**Status**:` line; a d
 
 | | |
 |---|---|
-| Agent | `args.architect` |
-| Reads | the triage artifact (verified facts, CONSIDERING bullets, hand-off, Decided entries), `<specs_dir>/scope-template.md`, matching rules, the tree |
-| ORDER | triage → executive summary (a causal mechanism between two named surfaces) → goals (one per verifiable outcome, each check run with its observed number) → non-goals → files affected (swept with `grep -rn`) → dependencies → open questions → self-check |
+| Agent | `args.architect`, on `models.scope` |
+| Plan | the triage plus every source document it names → anchors (a decision register's IDs, or stable section ids) → partitions by subsystem and source section |
+| Drafter (per partition) | its source sections → goals (each check run, with its observed number) → non-goals → files (swept with `grep -rn`) → dependencies → open questions, every item tagged with its anchors |
+| Synthesizer | fragments → executive summary (a causal mechanism between two named surfaces) → merged goals, non-goals, files affected, dependencies, open questions → self-check |
+| Lens critics | `template` (Part A, the five rules drafters most often miss), `fidelity:<partition>` (each anchor lands, neither widened nor narrowed), `tree` (Part B: paths resolve, observed numbers re-run, sibling copies swept); plus `fidelity:unassigned` when the plan left anchors unassigned |
 | Writes | `<specs_dir>/<slug>-scope.md` |
-| Returns | `{stage, scope: {scope_path, open_questions}, critique}` |
+| Returns | `{stage, scope: {scope_path, open_questions}, critique, composition}` |
 
 ### Spec
 
 | | |
 |---|---|
 | Agent | `args.architect`, on `models.spec` (the top tier by default) |
-| Reads | the scope (binding Goals and Non-Goals) and triage, `<specs_dir>/spec-template.md`, every rule matching the files (opened by name), the tree |
-| ORDER | problem → goals → non-goals → current state (path and symbol) → proposed design → `## Invariance` (reframing, surviving claim, one concrete falsifier) → phased Implementation Plan → self-check |
+| Plan | the scope (binding Goals and Non-Goals) and triage → anchors (`G<n>` per scope goal; `OQ<n>` for a closed scope question that lands in no goal) → core principle → phase outline (titles `Phase <n>: <name>`, routing, dependencies, anchors delivered) → partitions of anchors, phases, and design subsections → cross-cutting interfaces |
+| Drafter (per partition) | its anchors, phases, design subsections, and surfaces → current state (path and symbol), design elements, alternatives, terminology, full phase blocks, standards, `interface_notes`; every rule matching its surfaces opened by name |
+| Synthesizer | executive summary, goals, non-goals, dependencies from the scope → merged terminology and current state → proposed design (core principle first) → `## Invariance` (reframing, surviving claim, one concrete falsifier) → phase blocks spliced verbatim in plan order → standards → open questions → self-check |
+| Lens critics | `template` (Part A, routing lines, whole-suite and `git diff` rules), `phases:<partition>` (narrowest reader: each phase block judged alone), `fidelity:<partition>` (each scope goal lands in a goal and a delivering phase), `coherence` (dependencies, shared names and layouts, overlapping Scope IN, terminology, non-goals, Invariance); plus `phases:unassigned` / `fidelity:unassigned` for unowned phases or anchors |
 | Writes | `<specs_dir>/<slug>.md` with `Status: Draft` |
-| Returns | `{stage, spec: {spec_path, open_questions}, critique}`; deliberately **no phases** |
+| Returns | `{stage, spec: {spec_path, open_questions}, critique, composition}`; deliberately **no phases** |
 
 Each phase has `**Goal**:`, `**Agent routing**:` (exactly one bare routable agent name), `**Depends on**:`,
 `#### Scope` (**IN**/**OUT** as paths), `#### Tasks`, `#### Tests`, and `#### Acceptance Criteria`. The spec
@@ -178,6 +211,9 @@ Then, strictly in sequence (one working tree, no worktrees), for each phase:
 (c) architect review               model || models.review   agentType = the agent's lane architect,
       │                                                     or args.architect for unlaned agents
       │ unsound / null / any blocking concern ─► halt, sound: false
+(d) committer                      models.commit  stages the tree minus <specs_dir>, commits with a
+      │                                           `Spec-Phase: <slug> / <title>` trailer
+      │ failed commit / null ─► halt (the phase passed; its work is on the tree, uncommitted)
       ▼ next phase
 ```
 
@@ -190,8 +226,12 @@ Then, strictly in sequence (one working tree, no worktrees), for each phase:
   citing "Tests a wrong program passes too" and "Source-shape assertions with no named invariant").
   `protected_guards` and source-shape guards that mechanize an invariant are never findings. Every concern
   carries `severity` (`blocking`/`observation`) and an `anchor`.
+- The committer writes a subject in the repository's own convention (a conventional commit where the log
+  shows none), a short prose body, and the `Spec-Phase` trailer. It reports staged paths the phase scope does
+  not name as `unexpected` but commits them anyway. It never passes `--no-verify`, never amends, and never
+  edits source to satisfy a hook. Nothing staged is `committed: false` with no error, which is not a halt.
 
-Return: `{stage: "implement", results: [{phase, passed, sound, criteria, review, error?}], halted}`. The log
+Return: `{stage: "implement", results: [{phase, passed, sound, criteria, review, commit?, error?}], halted}`. The log
 line counts deferred criteria, which validate settles.
 
 ## Validate
@@ -207,8 +247,8 @@ is recomputed fail-closed: every suite passed and every configured suite was rep
 
 ## Review and the gate (Step 6)
 
-The command reports which artifact was written and a one-line result (lane; phase count; per-phase results;
-per-suite results), then:
+The command reports which artifact was written and a one-line result (lane; scope composition; spec phase
+count and composition; per-phase results with commit SHAs; per-suite results), then:
 
 - re-reads the triage `**Status**:` line before acting on a triage return (divergent, blocked, malformed);
 - reports the critique (`clean: false` lists residual issues; `null` = verdict unavailable);
@@ -226,6 +266,7 @@ per-suite results), then:
 | any | no `error`; no divergent return; `open_questions` is empty |
 | `triage` | not `Blocked` or malformed, and `**Status**` reads `Decided` |
 | `triage` / `scope` / `spec` | `critique` is non-null and `clean: true` |
+| `scope` / `spec` | both `composition` anchor lists are empty, or `critique` is non-null and `clean: true` |
 | `implement` | `halted` is null |
 | `validate` | `validation.passed` is true, then ship |
 
@@ -235,37 +276,47 @@ For any other stop, it waits for you to advance, refine, or rewind.
 
 ## Agent call kinds
 
-Thirteen labels appear in the workflow's progress view:
+These labels appear in the workflow's progress view:
 
 | Label | Stage | `agentType` | Tier | Schema |
 |---|---|---|---|---|
 | `triage` | triage | triage agent | `models.triage` | triage return |
 | `triage:critic` | triage | triage agent | `models.critic` | `{clean, issues}` |
 | `triage:revise` | triage | triage agent | `models.triage` | triage return |
-| `scope` | scope | architect | `models.scope` | `{scope_path, open_questions}` |
-| `scope:critic` | scope | architect | `models.critic` | `{clean, issues}` |
+| `scope:plan` | scope | architect | `models.scope` | anchors, partitions, cross-cutting, rationale |
+| `scope:draft:<partition>` | scope | architect | `models.scope` | anchored fragments |
+| `scope:synthesize` | scope | architect | `models.scope` | `{scope_path, open_questions}` |
+| `scope:critic:<lens>` | scope | architect | `models.critic` | `{clean, issues}` |
+| `scope:critic` | scope | architect | `models.critic` | `{clean, issues}` (re-checks, feedback rounds) |
 | `scope:revise` | scope | architect | `models.scope` | `{scope_path, open_questions}` |
-| `spec` | spec | architect | `models.spec` | `{spec_path, open_questions}` |
-| `spec:critic` | spec | architect | `models.critic` | `{clean, issues}` |
+| `spec:plan` | spec | architect | `models.spec` | anchors, core principle, phase outline, partitions, cross-cutting, rationale |
+| `spec:draft:<partition>` | spec | architect | `models.spec` | anchored fragments with full phase blocks |
+| `spec:synthesize` | spec | architect | `models.spec` | `{spec_path, open_questions}` |
+| `spec:critic:<lens>` | spec | architect | `models.critic` | `{clean, issues}` |
+| `spec:critic` | spec | architect | `models.critic` | `{clean, issues}` (re-checks, feedback rounds) |
 | `spec:revise` | spec | architect | `models.spec` | `{spec_path, open_questions}` |
 | `impl:<title>` | implement | the phase's routed agent | `implModel` / `models.impl` | none (text) |
 | `verify:checks:<title>` | implement | default workflow agent | `models.check` | `{passed, criteria[]}` |
 | `verify:review:<title>` | implement | the agent's lane architect | `models.review` | `{sound, concerns[]}` |
+| `commit:<title>` | implement | default workflow agent | `models.commit` | `{committed, sha, subject, unexpected[], error}` |
 | `validate:full-suite` | validate | default workflow agent | `models.validate` | `{passed, suites[]}` |
 
-`args.model`, when set, replaces the tier of drafters, revisers, dev agents, and reviews; critics, the
-checker, and validate keep theirs. `implModel` wins over `model` for dev agents.
+`args.model`, when set, replaces the tier of plans, drafters, synthesizers, revisers, dev agents, and
+reviews; critics, the checker, the committer, and validate keep theirs. `implModel` wins over `model` for dev agents.
 
 ## Ship (Step 7)
 
 Only after a validate return with `passed: true` and no code change since:
 
-1. **Implementation commit.** `git add -A -- . ':(exclude)<specs_dir>'`, then
-   `git add <specs_dir>/<slug>-triage.md <specs_dir>/<slug>-scope.md <specs_dir>/<slug>.md`, then commit.
-   Never `git add -A` over the specs directory: other workstreams' drafts would ride along. Record the SHA as
-   `<spec-sha>`.
+1. **Spec commit.** Implement already committed each phase. Any implementation change still on the tree (a
+   direct fix after a failed validate) is committed first, on its own: `git add -A -- . ':(exclude)<specs_dir>'`,
+   then commit if anything was staged. Then
+   `git add <specs_dir>/<slug>-triage.md <specs_dir>/<slug>-scope.md <specs_dir>/<slug>.md` and commit
+   `docs(specs): add <slug> pipeline artifacts`. Never `git add -A` over the specs directory: other
+   workstreams' drafts would ride along. Record the SHA as `<spec-sha>`.
 2. `git push -u <remote> <prefix>/<slug>`.
-3. `gh pr create`. The body includes the project name, the per-phase acceptance results, the architect
+3. `gh pr create`. The body includes the project name, the per-phase acceptance results with each phase
+   commit's short SHA, the architect
    **observations** from passing phases with their anchors, and the validate per-suite results. With
    `remove_artifacts_after_pr: true` it links the spec by SHA permalink
    (`<repo-url>/blob/<spec-sha>/<specs_dir>/<slug>.md`); with `false`, by branch path.
@@ -285,6 +336,7 @@ git restore --source=<spec-sha> -- <specs_dir>/<slug>-triage.md <specs_dir>/<slu
 ```
 
 `<spec-sha>` is in the PR body's permalink, or is the parent of the removal commit. The restored files are
-untracked. After validate passes again, commit the rework without the artifacts and push to the existing PR,
-then delete the restored files. If the rework changed an artifact, add it in that commit and run the removal
-step again, so the revision is recorded before it is removed.
+untracked. A rework that re-runs implement commits its phases itself. After validate passes again, commit any
+direct fix without the artifacts and push to the existing PR, then delete the restored files. If the rework
+changed an artifact, commit the changed artifacts on their own, push, and run the removal step again, so the
+revision is recorded before it is removed.

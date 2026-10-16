@@ -80,6 +80,8 @@ done
 # 23-24 command-only literals
 check "#23 inline refine rationale" 'selected by the developer without stated rationale' $CMD
 check "#24 spec removal commit" 'chore(specs): remove <slug> pipeline artifacts' $CMD
+# 25 phase-commit trailer, written by the implement committer and read back by re-entry slicing
+check "#25 phase-commit trailer" 'Spec-Phase: ' $WF $CMD
 
 # Workflow script syntax. A plain `node --check` on the script is not reliable (an ES module whose body
 # uses top-level return/await), so the body is wrapped in an async function inside a temporary .mjs first.

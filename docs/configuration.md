@@ -119,6 +119,7 @@ web app:
     "impl": "opus",
     "check": "opus",
     "review": "opus",
+    "commit": "sonnet",
     "validate": "sonnet",
     "escalation": "fable"
   }
@@ -220,12 +221,13 @@ agent call sets its model explicitly from here, so agent frontmatter `model:` is
 | Key | Default | Calls |
 |---|---|---|
 | `triage` | `opus` | triage draft and revise |
-| `scope` | `opus` | scope draft and revise |
-| `spec` | `fable` | spec draft and revise |
-| `critic` | `opus` | all three document critics |
+| `scope` | `opus` | scope plan, partition drafters, synthesizer, and reviser |
+| `spec` | `fable` | spec plan, partition drafters, synthesizer, and reviser |
+| `critic` | `opus` | every document critic, including the scope and spec lens critics and scoped re-checks |
 | `impl` | `opus` | phase dev agents |
 | `check` | `opus` | per-phase criteria checker |
 | `review` | `opus` | per-phase architect review |
+| `commit` | `sonnet` | per-phase committer (stages, writes the message, commits) |
 | `validate` | `sonnet` | full-suite runner |
 | `escalation` | `fable` | what the command sets `implModel` to when you ask to escalate |
 

@@ -24,8 +24,11 @@ command passes the configuration and the date in `args`, and why the script neve
 ### 2. git, with a base branch and a remote
 
 The orchestrator runs `rev-parse`, `checkout` / `checkout -b`, `pull`, `fetch --prune`, `add` with an
-`:(exclude)` pathspec, `commit`, `push -u`, `rm`, `restore --source`, and two `diff` shapes. **What good
-looks like**: `git pull <remote> <base>` works non-interactively.
+`:(exclude)` pathspec, `commit`, `push -u`, `rm`, `restore --source`, `log` with a trailer format, and two
+`diff` shapes. The implement stage's per-phase committer runs `add`, `diff --cached`, `log`, and
+`commit -F`; it never bypasses a pre-commit hook, so a hook that rejects a phase halts implement until you
+fix what it flagged. **What good looks like**: `git pull <remote> <base>` works non-interactively, and git is
+2.22 or newer (re-entry after `/resume` reads `git log --format='%(trailers:key=Spec-Phase,valueonly)'`).
 
 ### 3. The `gh` CLI, authenticated
 
@@ -37,10 +40,11 @@ pushes but cannot open the PR, and PR-based stage derivation is skipped.
 
 ### 4. Merge commits, or keep the artifacts
 
-With `ship.remove_artifacts_after_pr: true` (default), ship links the spec by the implementation commit's
-SHA and then removes the artifacts from the branch tip. A squash merge rewrites that commit away, and the
+With `ship.remove_artifacts_after_pr: true` (default), ship links the spec by the spec commit's SHA and then
+removes the artifacts from the branch tip. A squash merge rewrites that commit away, and the
 permalink no longer resolves from the base branch. Either allow merge commits or set
-`remove_artifacts_after_pr` to `false`.
+`remove_artifacts_after_pr` to `false`. Merge commits also keep the one-commit-per-phase history that
+implement writes; a squash merge folds it into one commit on the base branch.
 
 ### 5. A specs directory with two rules
 

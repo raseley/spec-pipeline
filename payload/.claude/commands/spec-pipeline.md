@@ -249,9 +249,13 @@ Fill each field as follows:
     hand-edit touched a passed phase's title, Agent routing, Scope, or Acceptance
     Criteria since the run that passed it, include that phase again.
   - With no in-memory return to consult (e.g. after `/resume`), do not guess. Do not blindly
-    re-run from the top. Walk the phases in spec order and check each phase's Acceptance
-    Criteria yourself (run the named tests, read the named files) until the first unmet
-    one. Slice there.
+    re-run from the top. Read the pass record from git instead. Every phase that passed was
+    committed with a `Spec-Phase: <slug> / <title>` trailer:
+    `git log --format='%(trailers:key=Spec-Phase,valueonly)' <base>..HEAD`. Slice at the first
+    phase, in spec order, that has no trailer. The unchanged-spec-section rule above still
+    applies. If the branch has implementation commits with no trailers (work from before
+    per-phase commits), fall back to checking each phase's Acceptance Criteria yourself (run
+    the named tests, read the named files) until the first unmet one, and slice there.
 
 - **`implModel`** (optional, `implement` only) — the dev agents run on `config.models.impl` by
   default; the criteria checker runs on `models.check` and the per-phase architect review on
@@ -309,6 +313,9 @@ Issue **one** `Workflow({ name: "spec-pipeline", args })` call with the assemble
 `args` (including `config`). Let it run to completion in the background. Do not issue
 another call until it returns and you have reviewed it (Step 6). Chaining to the next stage
 happens only through Step 6.6's gate, one call at a time.
+The script's own caps bound how many agents a scope or spec stage spawns. The session's
+workflow size guideline governs scripts you write, not this saved one, so do not shrink or
+refuse a call to fit it.
 An inline refine (Step 1a) skips this step entirely. The edit already happened in the
 main loop, and there is nothing to invoke.
 
@@ -320,7 +327,14 @@ When the workflow returns:
    of the stage's result:
    - at triage: the lane, or, when the return carries status "blocked" or the stage
      returned an `error`, the block or the malformation, per the rules below;
-   - at spec: the phase count, read from the spec file;
+   - at scope: the `composition`. Report the partition count, the plan's `rationale`, and
+     `agents_run`. Name every anchor in `unassigned_anchors` or `uncovered_anchors`;
+   - at spec: the phase count, read from the spec file, and the `composition`. Report the
+     partition count, `phases_planned`, the plan's `rationale`, and `agents_run`. Name every
+     entry in `unassigned_anchors` or `uncovered_anchors`. An entry is a scope goal (`G<n>`),
+     a closed scope question (`OQ<n>`), or `phase: <title>`. An uncovered anchor is one no
+     drafter delivered in a phase or explained. An uncovered phase came back from no drafter,
+     so the synthesizer wrote it from the plan's outline. The lists predate the revise rounds;
    - at implement: per-phase pass/fail and the architect's concerns;
    - at validate: per-suite results.
 
@@ -358,7 +372,11 @@ When the workflow returns:
    the stage.
 2. Doc stages (`triage`/`scope`/`spec`) return a `critique` object: the critic's
    **final verdict on the artifact as written**. On a compose round it covers the full
-   template audit, plus resolution of any issues it raised. On a `feedback` round it
+   template audit, plus resolution of any issues it raised. For scope and spec, that audit
+   is a merged verdict from parallel lens critics. A dead lens counts as an issue in it,
+   never as clean. Any issue sends the merged verdict to the revise rounds, and the returned
+   `critique` is then the scoped re-check of those issues. Its issues are the re-check's own
+   text, with no lens prefix. On a `feedback` round it
    covers only whether the feedback points were addressed, because the full audit happened
    when the artifact was first composed. Report it:
    - If `clean` is false, list the residual `issues` so the developer knows the artifact is
@@ -368,14 +386,15 @@ When the workflow returns:
    - If the stage returned an `error`, report it and stop. A malformed triage return carries
      an `error` *alongside* a written artifact, so say which is which.
 3. The `implement` return carries `halted`. When non-null, it names the phase where the
-   loop stopped (failed acceptance criteria, unsound architect review, or a dead agent).
+   loop stopped (failed acceptance criteria, unsound architect review, a failed commit, or a
+   dead agent).
    It means **later phases did not run**. Report the halted phase, its failing criteria
    and blocking concerns, and which phases remain. The developer decides whether to
    refine, rewind, or fix directly. This return is also the pass record that Step 3's
    re-entry slicing consults when the developer sends `implement` back in. Phases marked
    `passed: true` and `sound: true` are not resent.
 
-   Three fields need care when reporting:
+   Four fields need care when reporting:
 
    - **`sound: null` means the architect review never ran.** Either the criteria check failed
      first and the workflow skipped the review, since the phase halts either way and the
@@ -402,6 +421,17 @@ When the workflow returns:
      failures. Do not drop them either. If a review set `sound: true` while listing
      a blocking concern, the workflow fails closed and halts anyway. Report it as the
      contradiction it is.
+   - **Each phase that passed review carries `commit`**: `committed`, `sha`, `subject`,
+     `unexpected`, and `error`. Report each phase's short SHA and subject with its result.
+     `committed: false` with no `error` means the phase left nothing to stage. Report that,
+     but it is not a failure. List any `unexpected` paths (staged paths the phase scope does not
+     name). They are already in the commit, and the developer decides whether they belong.
+     A halt with `error` set on a passed, sound phase means the commit failed, usually a
+     pre-commit hook. The phase's work is reviewed but uncommitted on the tree. Report the
+     hook output. The developer fixes the complaint, and then you commit the phase by hand,
+     staging with `git add -A -- . ':(exclude)<specs_dir>'` and adding the
+     `Spec-Phase: <slug> / <title>` trailer. Do not resend that phase. Re-entry slicing starts
+     at the phase after it.
 4. The `validate` return carries `validation.passed` plus per-suite results. If it
    failed, report each suite's failures. Do not treat the workstream as shippable. The
    workflow fails closed: a configured suite with no passing report counts as failed even
@@ -460,6 +490,7 @@ When the workflow returns:
    | any | no `error`; no divergent return (item 1); `open_questions` is empty |
    | `triage` | the artifact is not `Blocked` or malformed, and its `**Status**` reads `Decided` — no `**Open**` entry remains (Step 2, rule 8) |
    | `triage` / `scope` / `spec` | `critique` is non-null and `clean: true` — residual critic issues need the developer to judge them |
+   | `scope` / `spec` | `composition.unassigned_anchors` and `composition.uncovered_anchors` are empty, or `critique` is non-null and `clean: true` — every listed anchor reached the lens critics, so only a clean final verdict shows it landed; otherwise it is a commitment that may have been dropped |
    | `implement` | `halted` is null |
    | `validate` | `validation.passed` is true — then run ship (Step 7) |
 
@@ -497,13 +528,15 @@ when that return clears the gate, or when the developer says **advance** and Ste
 the slug at **ship** (Step 2 rule 3). To ship, commit, push, and open the PR yourself in
 the main loop. There is no workflow stage past validate:
 
-1. **Implementation commit.** Stage the implementation changes with `<specs_dir>/`
-   excluded. Then add exactly this slug's three artifacts. Then commit:
-   `git add -A -- . ':(exclude)<specs_dir>'`,
+1. **Spec commit.** The implement stage already committed each phase. Any implementation
+   change still on the tree came after it, e.g. a direct fix after a failed validate. Commit
+   those first, on their own: `git add -A -- . ':(exclude)<specs_dir>'`, then
+   `git commit -m "<concise message>"` if anything was staged. Then commit exactly this
+   slug's three artifacts, alone:
    `git add <specs_dir>/<slug>-triage.md <specs_dir>/<slug>-scope.md <specs_dir>/<slug>.md`,
-   `git commit -m "<concise message referencing the slug and spec>"`. Never `git add -A`
-   over `<specs_dir>/`: another workstream's uncommitted artifacts would ride along into
-   this PR. Record this commit's SHA as `<spec-sha>`.
+   `git commit -m "docs(specs): add <slug> pipeline artifacts"`. Never `git add -A` over
+   `<specs_dir>/`: another workstream's uncommitted artifacts would ride along into this PR.
+   Record this commit's SHA as `<spec-sha>`.
 2. `git push -u <remote> <prefix>/<slug>`
 3. `gh pr create --base <base>` — the body names the project (`config.project.name`) and the
    slug, and links the spec:
@@ -516,7 +549,8 @@ the main loop. There is no workflow stage past validate:
      branch and merge with the PR.
 
    The body also summarizes:
-   - the per-phase acceptance results, with deferred criteria counted;
+   - the per-phase acceptance results, each with its phase commit's short SHA, with deferred
+     criteria counted;
    - the architect **observations** carried on the passing phases of the implement return,
      with their anchors (a PR reviewer is the right audience for them, where a developer
      deciding whether to advance was not);
@@ -546,17 +580,17 @@ step 4 before stopping.
 
 **Rework after ship.** When `<remove_after_pr>` is true, once step 4 lands the artifacts
 are gone from the branch tip, and Step 3 reconstructs `phases` from `<specs_dir>/<slug>.md`.
-Before any `rewind` or `refine` on a shipped slug, restore them from the implementation
-commit:
+Before any `rewind` or `refine` on a shipped slug, restore them from the spec commit:
 `git restore --source=<spec-sha> -- <specs_dir>/<slug>-triage.md <specs_dir>/<slug>-scope.md <specs_dir>/<slug>.md`
 (recover `<spec-sha>` from the PR body's permalink, or as the parent of the removal
 commit). `git restore` writes the working tree only, so the restored files are untracked.
-After validate passes again, commit the rework with only step 1's first `git add` (no
-artifact add) and push to the existing PR, then delete the restored files from the
-working tree. If the rework changed an artifact, instead add it in that commit and run
-step 4 again, so the revision is recorded in history before it is removed.
+A rework that re-runs `implement` commits its phases itself. After validate passes again,
+commit any direct fix still on the tree with only step 1's first `git add` (no artifact
+add), push to the existing PR, and then delete the restored files from the working tree.
+If the rework changed an artifact, instead commit the changed artifacts on their own, push,
+and run step 4 again, so the revision is recorded in history before it is removed.
 When `<remove_after_pr>` is false, the artifacts are still on the branch: rework edits them
-in place, and the rework commit includes any artifact it changed.
+in place, and commits any artifact it changed on its own after the fix.
 
 ## Guardrails
 

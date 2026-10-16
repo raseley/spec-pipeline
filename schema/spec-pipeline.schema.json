@@ -240,6 +240,7 @@
         "impl": { "type": "string", "minLength": 1, "default": "opus" },
         "check": { "type": "string", "minLength": 1, "default": "opus" },
         "review": { "type": "string", "minLength": 1, "default": "opus" },
+        "commit": { "type": "string", "minLength": 1, "default": "sonnet" },
         "validate": { "type": "string", "minLength": 1, "default": "sonnet" },
         "escalation": { "type": "string", "minLength": 1, "default": "fable" }
       }

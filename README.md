@@ -12,13 +12,16 @@
 You describe a change in plain English. The pipeline turns it into a pull request through five stages:
 **triage → scope → spec → implement → validate**, followed by **ship**. Each document stage writes a
 reviewable Markdown artifact into your repository. Implement executes the spec phase by phase with a
-routed specialist agent, an evidence-based checker, and an architect review. Validate runs your full test
-suites exactly once. Ship commits, pushes, and opens the PR with the results in its body.
+routed specialist agent, an evidence-based checker, and an architect review, and commits each phase as it
+passes. Validate runs your full test suites exactly once. Ship commits the spec, pushes, and opens the PR
+with the results in its body.
 
 What makes it different is where the rigor lives. **State lives in git-tracked artifacts, not in a
 process.** Any session, including one started tomorrow after `/resume`, re-derives where a workstream
 stands from the files on disk. **One stage runs per call**, and the orchestrator reviews every return
-before it moves. **Every document is drafted, audited by an adversarial critic, and revised.**
+before it moves. **Every document is drafted, audited by an adversarial critic, and revised**, and scope
+and spec plan their own composition first, so a large source is split across parallel drafters with every
+commitment tracked instead of silently dropped.
 **Open questions are a first-class channel**: a stage that cannot decide something hands you a short,
 plain-language decision with 2-4 options instead of guessing past it. **Everything fails closed**: a dead
 agent, a self-contradicting review, or a missing verdict is a halt, never a pass.
@@ -53,15 +56,15 @@ a report of every file it added or changed.
 flowchart LR
     idea(["/spec-pipeline your idea"]) --> triage
 
-    subgraph docs ["Document stages: draft, critic, revise"]
+    subgraph docs ["Document stages: plan, draft, critics, revise"]
         direction LR
         triage["Triage<br/>verify claims, route to a lane"] --> scope["Scope<br/>goals, non-goals, files"]
         scope --> spec["Spec<br/>phased plan, acceptance criteria"]
     end
 
-    spec --> impl["Implement<br/>per phase: dev, checker, architect review"]
+    spec --> impl["Implement<br/>per phase: dev, checker, architect review, commit"]
     impl --> validate["Validate<br/>every full suite, once"]
-    validate --> ship(["Ship<br/>commit, push, open PR"])
+    validate --> ship(["Ship<br/>commit spec, push, open PR"])
 
     triage -. "blocked" .-> you{{"You decide"}}
     docs -. "open questions" .-> you
@@ -79,11 +82,11 @@ Anything else stops the chain and tells you exactly why.
 | Stage | Who does the work | Writes | Default tier | What stops it |
 |---|---|---|---|---|
 | **Triage** | the triage agent (a lane architect by default) + a critic | `docs/specs/<slug>-triage.md` | `opus` | blocked routing, open decisions, a malformed or divergent return, an unclean critique |
-| **Scope** | the workstream's lane architect + a critic | `docs/specs/<slug>-scope.md` | `opus` | open questions, an unclean critique |
-| **Spec** | the lane architect + a critic | `docs/specs/<slug>.md` | `fable` (top tier) | open questions, an unclean critique |
-| **Implement** | per phase: the routed agent, a criteria checker, the lane's architect | code on branch `<prefix>/<slug>` | `opus` | the first phase with unmet criteria, a blocking concern, or a dead agent |
+| **Scope** | the workstream's lane architect: a plan, 1-6 partition drafters, a synthesizer, parallel lens critics | `docs/specs/<slug>-scope.md` | `opus` | open questions, an unclean critique, a source commitment that may have been dropped |
+| **Spec** | the lane architect: a plan, 1-6 partition drafters, a synthesizer, parallel lens critics | `docs/specs/<slug>.md` | `fable` (top tier) | open questions, an unclean critique, a scope goal or phase that may have been dropped |
+| **Implement** | per phase: the routed agent, a criteria checker, the lane's architect, a committer | one commit per phase on branch `<prefix>/<slug>` | `opus` | the first phase with unmet criteria, a blocking concern, a failed commit, or a dead agent |
 | **Validate** | one runner agent | nothing (report only) | `sonnet` | any suite with a failure or an error |
-| **Ship** | the orchestrator itself | commits, push, PR | (main session) | a failed push or PR creation |
+| **Ship** | the orchestrator itself | spec commit, push, PR | (main session) | a failed push or PR creation |
 
 ## What you get
 
@@ -233,7 +236,7 @@ merged, never overwritten). Authenticate `gh` so stage derivation and ship can s
 ## How it works
 
 The short version. The long versions are [`docs/mechanics.md`](docs/mechanics.md) and
-[`docs/design.md`](docs/design.md) (21 design principles, each with its reason and its enforcing mechanism).
+[`docs/design.md`](docs/design.md) (22 design principles, each with its reason and its enforcing mechanism).
 
 - **The artifact is the authority.** The next stage is never stored. The orchestrator derives it every time
   from which `docs/specs/<slug>-*.md` files exist, their `**Status**:` lines, the branch, and `gh`. A
@@ -244,6 +247,12 @@ The short version. The long versions are [`docs/mechanics.md`](docs/mechanics.md
 - **Draft → critic → revise.** Each document stage drafts, gets one full adversarial audit against its
   template, then up to two rounds of revise plus a narrow re-check of only the raised issues. A null critic
   verdict is "unknown", never "clean".
+- **Plan before drafting.** Scope and spec open with a plan agent that lists the source's commitments as
+  anchors (a scope's are the source's decisions or sections; a spec's are the scope's goals) and splits them
+  into 1-6 partitions sized to the source. One drafter per partition returns fragments, one synthesizer
+  writes the file, and parallel lens critics audit it (template, per-partition fidelity, tree grounding for
+  scope; template, narrowest reader, scope fidelity, cross-partition coherence for spec). A dropped
+  commitment is a set difference computed in plain JavaScript, reported to you, never silent.
 - **Inline vs structural refine.** Most feedback (picking an option, fixing a word) is a 30-second direct
   edit by the orchestrator, with no workflow call. Feedback that cascades (a different lane, new goals, a new
   phase split) re-runs the same stage, which revises its artifact in place with one reviser and one critic
@@ -255,8 +264,11 @@ The short version. The long versions are [`docs/mechanics.md`](docs/mechanics.md
   block is written for its narrowest reader.
 - **Targeted tests per phase, whole suite once.** Whole-suite criteria are marked `deferred` and settled by
   validate.
-- **Ship keeps the record, then cleans the tree.** The artifacts are committed with the implementation, the
-  PR links the spec by SHA, and a follow-up commit removes them from the branch tip.
+- **One commit per phase.** Each phase that passes its checker and review is committed before the next
+  starts, with a `Spec-Phase: <slug> / <title>` trailer. The PR reads phase by phase, and after `/resume` the
+  trailers tell the orchestrator exactly which phases already passed.
+- **Ship keeps the record, then cleans the tree.** The artifacts get a commit of their own, the PR links the
+  spec by that commit's SHA, and a follow-up commit removes them from the branch tip.
 
 ## Day-to-day cheat sheet
 
@@ -282,8 +294,9 @@ context and 2-4 options, records your pick verbatim in the artifact, and resumes
 | `docs/specs/<slug>-scope.md` | scope | untracked until ship |
 | `docs/specs/<slug>.md` | spec (`Draft`, flipped to `Final` when implement starts) | untracked until ship |
 
-At ship the three files are committed together with the implementation (and only this slug's three; other
-workstreams' drafts never ride along). The PR body links the spec at that commit's SHA. After the PR exists,
+At ship the three files get a commit of their own, after the per-phase implementation commits (and only
+this slug's three; other workstreams' drafts never ride along). The PR body links the spec at that commit's
+SHA. After the PR exists,
 a `chore(specs): remove <slug> pipeline artifacts` commit removes them from the branch tip, so your base
 branch stays clean while the full record remains in history. To rework a shipped slug, restore them with
 `git restore --source=<spec-sha> -- docs/specs/<slug>-triage.md docs/specs/<slug>-scope.md docs/specs/<slug>.md`.
@@ -318,12 +331,13 @@ definition's frontmatter.
 | Config key | Calls | Default | Why |
 |---|---|---|---|
 | `models.triage` | triage draft and revise | `opus` | routing against a fixed table; anything undecidable goes to you |
-| `models.scope` | scope draft and revise | `opus` | restating verified facts as checked goals |
-| `models.spec` | spec draft and revise | `fable` | the most valuable spend: a subtle spec defect costs far more in failed phases |
-| `models.critic` | every document critic | `opus` | critiques are checklists |
+| `models.scope` | scope plan, partition drafters, synthesizer, reviser | `opus` | restating verified facts as checked goals |
+| `models.spec` | spec plan, partition drafters, synthesizer, reviser | `fable` | the most valuable spend: a subtle spec defect costs far more in failed phases |
+| `models.critic` | every document critic, including the lens critics | `opus` | critiques are checklists |
 | `models.impl` | phase dev agents | `opus` | the spec already fixed scope and criteria; a weak attempt costs one halted phase |
 | `models.check` | per-phase criteria checker | `opus` | evidence-based: runs tests, reads files |
 | `models.review` | per-phase architect review | `opus` | judges the tree against a spec the top tier wrote |
+| `models.commit` | per-phase committer | `sonnet` | mechanical: stage, write the message, commit |
 | `models.validate` | full-suite runner | `sonnet` | mechanical: run, read the summary line, report |
 | `models.escalation` | `implModel` when you ask to escalate | `fable` | an explicit, per-run decision |
 

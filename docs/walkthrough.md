@@ -115,8 +115,12 @@ No open entry remains, so triage becomes `**Status**: Decided`. The gate is clea
 
 ## 4. Scope
 
-`api-architect` writes `docs/specs/partial-refunds-scope.md`. Every goal names its check and the number it
-observed; non-goals name things a spec author could reach for:
+The scope stage first runs a plan agent as `api-architect`. The source is one short idea plus its triage, so
+the plan lists four anchors (the ceiling, the refunded-so-far figure, the table column, and triage decision 1)
+and puts them all in **one partition**: one drafter is enough to hold it. The drafter returns fragments
+tagged with their anchors, a plain-JS check confirms every anchor is covered, and a synthesizer writes
+`docs/specs/partial-refunds-scope.md`. Every goal names its check and the number it observed; non-goals name
+things a spec author could reach for:
 
 ```markdown
 ## Goals
@@ -141,13 +145,20 @@ observed; non-goals name things a spec author could reach for:
 No open questions — spec drafting may begin.
 ```
 
-The critic's audit is clean, there are no questions, so the chain advances to `spec`.
+Three lens critics audit it in parallel: `template`, `fidelity:<partition>` (each anchor lands, neither
+widened nor narrowed), and `tree` (paths resolve, observed numbers re-run). The orchestrator reports the
+composition ("1 partition; one idea, one subsystem; 7 agents run; no unassigned or uncovered anchors"). The
+merged audit is clean and there are no questions, so the chain advances to `spec`. A large source (a design
+document with a decision register, say) would have been split across up to six partitions the same way.
 
 ## 5. Spec
 
-The spec stage runs on the top tier (`models.spec`). It writes `docs/specs/partial-refunds.md` with a
-current-state section anchored at path and symbol, a design that cites real exemplars at `path:line`, an
-Invariance section, and two phases:
+The spec stage runs on the top tier (`models.spec`). Its plan agent reads the scope, turns its three goals into
+anchors `G1`-`G3`, fixes the core principle and a two-phase outline (`api-dev`, then `web-dev`), and, with a
+scope this small, plans one partition. The drafter writes the current state, the design, and both full phase
+blocks as fragments; the synthesizer splices them into `docs/specs/partial-refunds.md` with a current-state
+section anchored at path and symbol, a design that cites real exemplars at `path:line`, an Invariance
+section, and two phases:
 
 ```markdown
 ## Invariance
@@ -208,7 +219,9 @@ No open questions — implementation may begin.
 Note what the criteria avoid: no "Phase 1", no "the new field" without a path, no whole-suite run, and no
 `git diff` against `HEAD`. The checker will see this block and nothing else.
 
-The critique is clean and there are no questions, so the gate advances to implement.
+Its lens critics (`template`, `phases:<partition>` reading each phase block alone, `fidelity:<partition>`
+checking each scope goal lands in a delivering phase, and `coherence`) come back clean, there are no
+questions, so the gate advances to implement.
 
 ## 6. Implement
 
@@ -221,8 +234,9 @@ Entering implement is the spec's approval. The orchestrator:
    agent: "api-dev", scope: "...", acceptance: "..." }, { title: "Show refunded-so-far in the order table",
    agent: "web-dev", ... }]`) and calls the workflow with `architect: "api-architect"`.
 
-Per phase: the dev agent implements, the checker runs the named tests, and the architect of the agent's own
-lane reviews (`api-architect` for phase 1, `web-architect` for phase 2). The return:
+Per phase: the dev agent implements, the checker runs the named tests, the architect of the agent's own
+lane reviews (`api-architect` for phase 1, `web-architect` for phase 2), and a committer commits the passed
+phase with a `Spec-Phase: partial-refunds / <title>` trailer before the next phase starts. The return:
 
 ```json
 {
@@ -244,19 +258,21 @@ lane reviews (`api-architect` for phase 1, `web-architect` for phase 2). The ret
             "concern": "GET /api/v1/orders/{order_id} still omits refunded_cents; only the list route gained it.",
             "anchor": "## Goals, goal 2" }
         ]
-      }
+      },
+      "commit": { "committed": true, "sha": "9b1e7d0...", "subject": "feat(refunds): cap partial refunds at the captured total", "unexpected": [] }
     },
-    { "phase": "Show refunded-so-far in the order table", "passed": true, "sound": true, "criteria": [...], "review": {...} }
+    { "phase": "Show refunded-so-far in the order table", "passed": true, "sound": true, "criteria": [...], "review": {...}, "commit": {...} }
   ]
 }
 ```
 
-The orchestrator reports both phases as passed, lists the observation separately as non-blocking, and
-advances to validate.
+The orchestrator reports both phases as passed with their commit SHAs, lists the observation separately as
+non-blocking, and advances to validate.
 
 Had phase 1 failed its criteria, the return would carry `halted: "Enforce the refund ceiling ..."`,
-`sound: null` ("review not run"), and phase 2 would not have run. After a fix, `advance` would resend phase 1
-onward; "retry that phase on fable" would resend it with `implModel` set to `models.escalation`.
+`sound: null` ("review not run"), nothing would have been committed for it, and phase 2 would not have run.
+After a fix, `advance` would resend phase 1 onward (after `/resume`, the orchestrator finds the first phase with
+no `Spec-Phase` trailer in `git log main..HEAD`); "retry that phase on fable" would resend it with `implModel` set to `models.escalation`.
 
 ## 7. Validate
 
@@ -275,9 +291,10 @@ Green, so the gate runs ship.
 
 ## 8. Ship
 
-1. `git add -A -- . ':(exclude)docs/specs'`, then
+1. The two phase commits are already on the branch, and nothing else changed since validate. So the only new
+   commit is the spec commit:
    `git add docs/specs/partial-refunds-triage.md docs/specs/partial-refunds-scope.md docs/specs/partial-refunds.md`,
-   then one commit; its SHA is `<spec-sha>`.
+   `git commit -m "docs(specs): add partial-refunds pipeline artifacts"`; its SHA is `<spec-sha>`.
 2. `git push -u origin feat/partial-refunds`.
 3. `gh pr create` with a body like:
 
@@ -287,8 +304,8 @@ Green, so the gate runs ship.
    Spec: https://github.com/<owner>/<repo>/blob/<spec-sha>/docs/specs/partial-refunds.md
 
    ### Implement
-   - Enforce the refund ceiling and expose refunded_cents: 3/3 criteria met; review sound
-   - Show refunded-so-far in the order table: 2/2 criteria met; review sound
+   - Enforce the refund ceiling and expose refunded_cents (9b1e7d0): 3/3 criteria met; review sound
+   - Show refunded-so-far in the order table (c42a815): 2/2 criteria met; review sound
 
    ### Architect observations (non-blocking)
    - GET /api/v1/orders/{order_id} still omits refunded_cents; only the list route gained it. (## Goals, goal 2)
