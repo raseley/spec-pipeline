@@ -10,10 +10,14 @@ fresh session (or `/resume`) can pick up any workstream cold.
 
 Lifecycle of an artifact set:
 
-1. Each stage writes its artifact here. Artifacts stay **untracked** while the workstream is in progress.
-2. The ship step commits them with the implementation, links the spec from the PR, and (by default) removes
-   them from the branch tip in a separate `chore(specs): remove <slug> pipeline artifacts` commit. The record
-   survives in history; recover a file with `git restore --source <sha> -- <path>`.
+1. Each stage writes its artifact here. Artifacts stay **untracked** through triage, scope, and spec.
+2. When the spec is approved, the orchestrator creates the workstream's `<prefix>/<slug>` branch, marks the
+   spec `Final`, and commits the three artifacts on it (`docs(specs): add <slug> pipeline artifacts`). From
+   then on they are tracked on that branch, and every later edit gets its own
+   `docs(specs): revise <slug>: ...` commit.
+3. The ship step links the spec from the PR and (by default) removes the artifacts from the branch tip in a
+   separate `chore(specs): remove <slug> pipeline artifacts` commit. The record survives in history; recover
+   a file with `git restore --source <sha> -- <path>`.
 
 Rules for this directory:
 

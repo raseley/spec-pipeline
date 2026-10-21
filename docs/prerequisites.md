@@ -40,8 +40,8 @@ pushes but cannot open the PR, and PR-based stage derivation is skipped.
 
 ### 4. Merge commits, or keep the artifacts
 
-With `ship.remove_artifacts_after_pr: true` (default), ship links the spec by the spec commit's SHA and then
-removes the artifacts from the branch tip. A squash merge rewrites that commit away, and the
+With `ship.remove_artifacts_after_pr: true` (default), ship links the spec at the pre-removal branch tip's SHA
+and then removes the artifacts from the branch tip. A squash merge rewrites that commit away, and the
 permalink no longer resolves from the base branch. Either allow merge commits or set
 `remove_artifacts_after_pr` to `false`. Merge commits also keep the one-commit-per-phase history that
 implement writes; a squash merge folds it into one commit on the base branch.
@@ -49,7 +49,8 @@ implement writes; a squash merge folds it into one commit on the base branch.
 ### 5. A specs directory with two rules
 
 The specs directory (`docs/specs/` by default) holds the three templates and every workstream's artifacts.
-Artifacts stay **untracked until ship**. Two rules protect it: never `git add -A` over it (another
+Artifacts stay **untracked until the spec is approved**, when the orchestrator commits this slug's three on
+its `<prefix>/<slug>` branch. Two rules protect the directory: never `git add -A` over it (another
 workstream's drafts would ride along into your PR), and never glob-delete in it (it holds the templates and
 other drafts).
 
@@ -64,7 +65,7 @@ worktree is invisible to the checker and the reviewer. Enforce it twice: a steer
 
 The orchestrator checks out the base branch before creating `<prefix>/<slug>`. If uncommitted changes make
 git refuse that checkout, the run stops and asks you to commit or discard. (The workstream's own untracked
-artifacts are expected and carried across.)
+artifacts are expected and carried across, then committed on the new branch as the spec commit.)
 
 ### 8. Model tiers your account can run
 

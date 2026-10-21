@@ -4,6 +4,59 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-21
+
+### Added
+- Spec phases carry a machine-read `**Design**:` line naming, character for character and `; `-separated,
+  the `## Proposed Design` subsections the phase implements (or `None`). The orchestrator reconstructs
+  `phases` as `[{ title, agent, design, scope, acceptance }]` and greps each heading before implement; a
+  heading that does not resolve stops the phase. A spec without the line (`design: null`) falls back to all
+  of `## Proposed Design`.
+- Step 4a revision commits: from the spec commit on, every edit to a slug's artifacts (inline refine,
+  structural refine, re-sync, rework) is committed on its own as `docs(specs): revise <slug>: <what changed>`,
+  never amended.
+- An off-list `Selected` form in all three templates
+  (`none of the listed options — <the answer as given, or "deferred: <what decides it later>">`). The
+  orchestrator records an answer off the list as given and never maps it onto the nearest option.
+- Plain-JS `[check]` issues in the spec stage over the lenses' returned indexes: unknown agent names,
+  unresolved Design headings, `Depends on` lines that name no earlier phase, more than six acceptance
+  criteria, and criterion runs that match a configured suite's whole command. The plan check also rejects a
+  backward `Depends on` in the outline before drafting.
+- Step 2 finds a slug's artifacts after approval: when none is on disk it queries PRs for every configured
+  prefix, then the local and remote branches, and recognizes a ship closed unmerged.
+- Contract #26 (the `docs(specs): add` and `docs(specs): revise` commit subjects) in `docs/contracts.md` and
+  `scripts/check-contracts.sh`.
+
+### Changed
+- The three artifacts are committed when the spec is approved, not at ship. Step 4 is now "approve the spec:
+  branch, Final, commit": it creates `<prefix>/<slug>`, marks the spec `Final`, and commits the artifacts as
+  `docs(specs): add <slug> pipeline artifacts` before the `implement` call. Every sub-step is idempotent, and
+  a failed commit stops the chain. Ship's first step becomes "Leftover commits", and the PR permalink points
+  at the pre-removal branch tip (`git rev-parse HEAD`), so it shows the artifacts' final text. Rework after
+  ship updates the PR body's permalinks.
+- Implement reads are scoped to the phase. The dev agent reads `### Core Principle`, the subsections its
+  `**Design**:` line names, and its phase block; the architect reviewer reads the same plus `## Invariance`;
+  the committer reads only the phase block.
+- The spec critic panel is four lenses with bounded reads: `phases:<partition>` (its phase blocks only;
+  owns the phase-block and acceptance-criteria rules; returns an index), `template` (the sections above the
+  plan, plus Standards References and Open Questions; returns the design headings), `fidelity:<partition>`
+  (its goals, design subsections, and phases; now also owns design-versus-Tasks agreement), and `coherence`
+  (a second hop over shared files and cross-cutting decisions; skipped at one partition).
+- The spec revise cap is one round; scope and triage keep two. A spec re-check is partitioned by lens and
+  keeps each issue's lens prefix (`spec:critic:recheck:<lens>`); what it still flags stops at the gate. A
+  revise round never splits, merges, or renumbers a phase; a needed split becomes an open question.
+- Acceptance criteria are capped at six per phase and must be behavioural: a named test selection, a stated
+  output on a program path, or a benchmark threshold. One command or test selection per bullet. The only
+  shape check allowed is an absence grep for an `**IN**` retirement, an `**OUT**` exclusion, a scope non-goal,
+  or a steering-file constraint, and the criterion names which.
+- The triage template has five sections: `## ORDER` is gone from the artifact (`ORDER.` remains the prompt
+  operator). Its non-blocking unfillable form now applies to `## VALIDATE` only.
+- The open-question field rules moved from prompt prose into the `open_questions` schema's field
+  descriptions.
+- A revised spec keeps its status: the reviser leaves `Draft` or `Final` exactly as found.
+- Step 1a's decision-recording rules are trimmed to what the templates cannot know (date, label, rationale,
+  status); the templates own the entry shapes.
+
 ## [0.2.0] - 2026-10-15
 
 ### Added

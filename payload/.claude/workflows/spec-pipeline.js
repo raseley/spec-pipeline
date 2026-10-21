@@ -1,7 +1,7 @@
 export const meta = {
   name: "spec-pipeline",
   description:
-    "Run one stage of triage -> scope -> spec -> implement -> validate for a workstream, writing <specs_dir>/<slug>-*.md (docs/specs by default). The workflow is re-entrant. The orchestrating session passes the stage to run and the project configuration (.claude/spec-pipeline.json) as args.config. The orchestrator reviews each return. It auto-advances to the next stage when no open_questions, block, halt, or failure needs the human. Otherwise the human reviews and then advances or refines. Structural rework re-invokes the same stage with feedback, and the stage revises its artifact in place. The orchestrator applies trivial edits inline without a workflow run. The git-tracked <specs_dir>/<slug>-*.md files carry state across invocations and across sessions. Nothing depends on a long-running process.",
+    "Run one stage of triage -> scope -> spec -> implement -> validate for a workstream, writing <specs_dir>/<slug>-*.md (docs/specs by default). The workflow is re-entrant. The orchestrating session passes the stage to run and the project configuration (.claude/spec-pipeline.json) as args.config. The orchestrator reviews each return. It auto-advances to the next stage when no open_questions, block, halt, or failure needs the human. Otherwise the human reviews and then advances or refines. Structural rework re-invokes the same stage with feedback, and the stage revises its artifact in place. The orchestrator applies trivial edits inline without a workflow run. The on-disk <specs_dir>/<slug>-*.md files carry state across invocations and across sessions; the orchestrator commits them on the <prefix>/<slug> branch when it approves the spec, and (by default) removes them in the last ship commit. Nothing depends on a long-running process.",
   phases: [
     // `model` here is display-only, and it shows the default tier (config.models). The tier each
     // call actually runs on is set by the `model` option on its agent() call below, read from
@@ -9,8 +9,8 @@ export const meta = {
     // or an agent definition's frontmatter.
     { title: "Triage",    detail: "Verify the raw idea against the tree, route to a configured lane's architect and classify the change type (branch prefix) - or return blocked when routing cannot be decided; write <specs_dir>/<slug>-triage.md; triage-tier draft/revise, critic-tier critic", model: "opus" },
     { title: "Scope",     detail: "Goals, non-goals, files-affected; write <specs_dir>/<slug>-scope.md. Compose: a scope-tier plan partitions the source's anchors (1 to 6, sized to the source). One scope-tier drafter per partition, a scope-tier synthesizer, and parallel critic-tier critics (template, per-partition fidelity, tree grounding). Scope-tier revise and critic-tier scoped re-check, up to 2 rounds. Feedback: one scope-tier reviser, one critic-tier critic", model: "opus" },
-    { title: "Spec",      detail: "Draft <specs_dir>/<slug>.md per <specs_dir>/spec-template.md (Status: Draft). Compose: a spec-tier (top tier by default) plan reads the scope and fixes the phase outline, core principle, shared interfaces, and partitions (1 to 6, sized to the scope). One spec-tier drafter per partition writes its design and full phase blocks, a spec-tier synthesizer writes the file, and parallel critic-tier critics (template, per-partition narrowest reader, per-partition scope fidelity, cross-partition coherence) audit. Spec-tier revise and critic-tier scoped re-check, up to 2 rounds. Feedback: one spec-tier reviser, one critic-tier critic", model: "fable" },
-    { title: "Implement", detail: "Run each spec phase via its routed dev agent (impl tier; implModel escalates); criteria-check (check tier), then qualitative architect review (review tier) only if that passes; commit each passed phase (commit tier); halts at the first failing phase", model: "opus" },
+    { title: "Spec",      detail: "Draft <specs_dir>/<slug>.md per <specs_dir>/spec-template.md (Status: Draft; the orchestrator marks it Final and commits the three artifacts on approval). Compose: a spec-tier (top tier by default) plan reads the scope and fixes the phase outline, core principle, shared interfaces, and partitions (1 to 6, sized to the scope). One spec-tier drafter per partition writes its design subsections and full phase blocks, each phase naming on a Design line the design subsections it implements; a spec-tier synthesizer writes the file. A four-lens critic-tier panel audits it, each lens reading a bounded slice: phases (one per partition, its phase blocks only), template (the sections above the plan), fidelity (one per partition, its goals, design subsections, and phases), then coherence (one, a second hop over shared files and cross-cutting decisions, skipped at one partition). Plain-JS checks over the lenses' returned indexes add [check] issues for agent names, Design headings, Depends on order, the criteria cap, and whole-suite runs. One spec-tier revise round, then one critic-tier re-check per lens group within that lens's read, its issues re-prefixed with that lens; what it still flags stops at the orchestrator's gate. Feedback: one spec-tier reviser, one critic-tier critic", model: "fable" },
+    { title: "Implement", detail: "Run each spec phase via its routed dev agent (impl tier; implModel escalates), which reads only the phase block and the Proposed Design subsections its Design line names; criteria-check (check tier) on the criteria alone, then qualitative architect review (review tier) on the same sections plus Invariance, only if that passes; commit each passed phase (commit tier); halts at the first failing phase", model: "opus" },
     { title: "Validate",  detail: "Full-suite regression gate before ship: run every configured full suite, report-only", model: "sonnet" }
   ]
 };
@@ -32,11 +32,14 @@ export const meta = {
 //             stage then revises that artifact in place instead of redrafting it.
 //   architect carried forward from the triage return (or recovered from the triage artifact's
 //             **Lane**: line): one of config.lanes[].architect. Required for scope, spec, implement.
-//   phases    always rebuilt by the orchestrator from <specs_dir>/<slug>.md's phase headings
-//             and "**Agent routing**:" lines, never carried forward from the spec return, so the
-//             on-disk spec is the single source of truth: [{ title, agent, scope, acceptance }].
-//             On re-entry after a halt, the orchestrator sends only the phases not yet passed
-//             (see the command doc, Step 3). The loop below runs whatever it receives.
+//   phases    always rebuilt by the orchestrator from <specs_dir>/<slug>.md's phase blocks (headings,
+//             "**Agent routing**:" and "**Design**:" lines, Scope, Acceptance Criteria), never carried
+//             forward from the spec return, so the on-disk spec is the single source of truth:
+//             [{ title, agent, design, scope, acceptance }]. `design` is the phase's "**Design**:" line as
+//             an array of ## Proposed Design subsection headings; [] when the line reads None; null when
+//             the spec predates the line, which sends the dev agent and reviewer to all of
+//             ## Proposed Design as before. On re-entry after a halt, the orchestrator sends only the
+//             phases not yet passed (see the command doc, Step 3). The loop below runs whatever it receives.
 //   model     optional model override for every drafter, reviser, dev, and architect-review call,
 //             replacing that call's configured tier (e.g. "opus" when the spec tier is unavailable).
 //             Critics, the criteria checker, and validate keep their own configured tiers.
@@ -178,6 +181,14 @@ const NARROW_DIRS = c.lanes.flatMap(l => l.narrow_dirs);
 const WHOLE_SUITE = c.suites
   .map(s => `\`${s.command}\`${s.cwd !== "." ? ` from ${s.cwd}/` : ""} (the whole ${s.name} suite)`)
   .concat(c.whole_suite_patterns);
+// The spec stage's plain-JS whole-suite check over each phase's indexed test runs. A run is a
+// suite's whole invocation when, with a leading `cd <dir> &&` and every flag token dropped, its
+// words equal that suite command's (trailing slashes ignored). A run that adds a path or a
+// selector differs, so it passes. whole_suite_patterns are prose, so the lens critics, not this
+// check, enforce them.
+const suiteWords = (cmd) => String(cmd).trim().replace(/^cd\s+\S+\s*&&\s*/, "")
+  .split(/\s+/).filter(w => w && !w.startsWith("-")).map(w => w.replace(/\/+$/, "")).join(" ");
+const wholeSuiteHit = (run) => c.suites.find(s => suiteWords(s.command) === suiteWords(run)) || null;
 
 // An agent is mapped to the one lane that lists it. An agent listed by several lanes (for example
 // `general-purpose` used for every lane) is ambiguous and maps to no lane; callers then fall back
@@ -221,8 +232,8 @@ const OQ = {
     type: "object",
     required: ["question", "context", "options"],
     properties: {
-      question: { type: "string" },
-      context:  { type: "string" },
+      question: { type: "string", description: "The decision as one direct sentence." },
+      context:  { type: "string", description: "One paragraph or less of plain language for someone who has not read the artifact and does not know this subsystem: what decision is on the table, what changes downstream depending on the answer, and why it could not be settled automatically. No file paths, type or class names, template or rule filenames, or pipeline jargon." },
       // The 2-4 bound is enforced here, not left to OQ_GUIDANCE prose. A one-option entry is
       // not a decision, because there is nothing to choose. A five-option entry does not fit
       // AskUserQuestion, which caps at 4. The orchestrator cannot render either one to the
@@ -231,37 +242,30 @@ const OQ = {
         type: "array",
         minItems: 2,
         maxItems: 4,
+        description: "The concrete choices. Never free text where the choices can be listed.",
         items: {
           type: "object",
           required: ["label", "description"],
-          properties: { label: { type: "string" }, description: { type: "string" } }
+          properties: {
+            label:       { type: "string", description: "A few words." },
+            description: { type: "string", description: "What picking it means." }
+          }
         }
       },
-      recommended: { type: "string" } // must match one options[].label, or be omitted
+      recommended: { type: "string", description: "The label you would pick, character-for-character one of options[].label. Omit the field entirely when you have no lean." }
     }
   }
 };
 
-// Interpolated into every doc stage's drafter and reviser prompt so the three stages describe the
-// returned `context` the same way. Only the plain-language rule lives here. The 2-4 option bound
-// is in the schema (OQ above). Copying the artifact's entries into the return is each stage's
-// contract below.
+// Interpolated into every doc stage's drafter and reviser prompt. Only the two rules a field
+// description cannot carry live here: the artifact's own question section stays technical, and
+// the returned context must suffice on its own. Each field's format is in OQ's description
+// strings, and the 2-4 option bound is in its schema. Copying the artifact's entries into the
+// return is each stage's contract below.
 const OQ_GUIDANCE =
-  `open_questions is a returned field. The artifact's own question section stays technical.
-   Each open_questions entry follows these rules:
-   - "question" is the decision as one direct sentence.
-   - "options" are the concrete choices.
-   - Each option is a label of a few words plus what picking it means.
-   - Never use free text where the choices can be listed.
-   - "recommended" is the label you would pick.
-   - Omit "recommended" entirely when you have no lean.
-   - "context" is one paragraph or less of plain language.
-   - Write "context" for someone who has not read the artifact and does not know this subsystem.
-   - "context" says what decision is on the table.
-   - "context" says what changes downstream depending on the answer.
-   - "context" says why the decision could not be settled automatically.
-   - "context" contains no file paths, type or class names, template or rule filenames, or pipeline jargon.
-   - The reader must be able to choose an option from "context" alone.`;
+  `open_questions is a returned field. The artifact's own question section stays technical. The
+   return's "context" is the plain-language framing the developer reads instead of the artifact,
+   and they must be able to choose an option from it alone. Each field's rule is in the schema.`;
 
 // Test-run scope policy for the implement stage, interpolated into both the dev-agent prompt
 // and the criteria-checker prompt so the two agents cannot disagree about what to run.
@@ -307,7 +311,7 @@ const mirroringContract = ({ section, openEntries, noneSentence }) => `
 MIRRORING. The file on disk is authoritative. Return one open_questions entry per ${openEntries}
 in the file's ${section} section, in the file's order. Return no other entries. A closed or
 Decided entry gets no return entry. If the file has the sentence "${noneSentence}", return an empty array. If you return an
-empty array, the file must have that sentence. Copy each entry's **Context** paragraph verbatim.
+empty array, the file's section either has that sentence or holds only closed entries. Copy each entry's **Context** paragraph verbatim.
 Copy each **Options** label and description verbatim. Copy the **Recommended** label verbatim.
 Never rewrite these. Never invent a recommended label. Return the path of the file you actually wrote.`;
 
@@ -364,7 +368,16 @@ const SCOPE_REVISER_CONTRACT = `${SCOPE_MIRROR}${frozenFrontmatter("**Slug**, **
 // artifact and the template. So a structural refine would rewrite Goals and Non-Goals without
 // seeing the scope that authorized them, unless it is told to go read it.
 const SPEC_REVISER_CONTRACT = `${SPEC_MIRROR}${frozenFrontmatter("**Date** and **Status**")}
-A spec under revision stays Status: Draft. Advancing it to Final is the operator's decision.
+Leave Status exactly as you found it, Draft or Final. The operator alone changes it: Final records
+approval, and a revision of an approved spec stays Final.
+DESIGN LINES. Every phase's **Design** line names ## Proposed Design subsection headings character
+for character, separated by "; ", or reads None. When you add, rename, or merge a subsection,
+update every **Design** line that names it in the same edit.
+PHASES. Never split, merge, or renumber a phase in a revise round. A phase over the
+acceptance-criteria cap is collapsed: each criterion that a test the phase already names asserts
+is folded into that named test. An issue that can only be resolved by splitting a phase is left
+unresolved. State that it needs a split as a numbered ## Open Questions entry naming the phase
+heading and the split, and copy that entry into your return, so it reaches the orchestrator's gate.
 UPSTREAM BINDING. Before touching ## Executive Summary, ### Goals, or ### Non-Goals, read
 ${SPECS}/${slug}-scope.md. Keep those sections faithful to its ## Goals and ## Non-Goals. If a
 feedback point requires contradicting the scope, make the change. Then raise the divergence as a
@@ -374,7 +387,8 @@ commitment silently.`;
 // Within-stage self-refinement, two paths chosen by whether reviewer feedback is present.
 //
 // Compose (no feedback): draft -> one full adversarial audit against the template and the
-// applicable path-scoped rules -> up to 2 rounds of (revise -> scoped re-check). Only the
+// applicable path-scoped rules -> up to the stage's round cap of (revise -> scoped re-check):
+// 2 for triage and scope, 1 for spec. Only the
 // first critique is a full audit. Each re-check verifies just the issues previously raised.
 // That lets the loop stop as soon as those issues are resolved, instead of using up its round
 // cap on new nitpicks from a fresh critic. A clean re-check therefore means "the full audit's
@@ -408,6 +422,13 @@ commitment silently.`;
 // can enforce (triage's Status/Lane/Branch agreement, see TRIAGE_REVISER_CONTRACT). It defaults
 // to "", so a caller that omits it changes nothing.
 //
+// `recheckScope` is the one per-stage extension point on the re-check. It is an optional
+// function (lens) => string, or null, giving the read instruction for a lens name. When a kit
+// has one, reviseLoop() groups the merged critique's issues by their "[<lens>] " prefix and runs
+// one scoped re-check per group, each within its lens's read, so a re-check never reads more of
+// the artifact than the lens that raised the issue did. Without it, the re-check is one critic
+// over the whole artifact, as before. Scope and triage pass none.
+//
 // The machinery is split three ways so the scope and spec compose paths can reuse it.
 // refineKit() builds one stage's critic and reviser. reviseLoop() runs the revise -> scoped
 // re-check rounds from any draft result and critique. refine() is the single-drafter path. Triage
@@ -420,19 +441,22 @@ commitment silently.`;
 // divisions than a cap allows gets coarser groups, not dropped ones. Every place a cap applies
 // logs what it bounded. meta is a pure literal, so its phase details repeat these numbers.
 const MAX_SCOPE_PARTITIONS = 6;  // scope drafters, and so per-partition fidelity critics
-const MAX_SPEC_PARTITIONS = 6;   // spec drafters, and so per-partition narrowest-reader and fidelity critics
+const MAX_SPEC_PARTITIONS = 6;   // spec drafters, and so per-partition phases and fidelity critics
 
 // agents_run in the scope and spec returns counts every agent call the stage started, including
 // calls that came back null. The orchestrator reports it, so a large composition's cost is visible.
 let agentsRun = 0;
 const runAgent = (prompt, opts) => { agentsRun++; return agent(prompt, opts); };
 
-function refineKit(agentType, schema, label, ph, artifactPath, templatePath, { draftModel, stageInstructions = "" } = {}) {
+function refineKit(agentType, schema, label, ph, artifactPath, templatePath, { draftModel, stageInstructions = "", reviseRounds = 2, recheckScope = null } = {}) {
   const draftOpts = { model: model || draftModel };
   // `lens` names one critic of a parallel panel. Its label must differ from its siblings', so the
-  // progress tree and the journal can tell them apart. The single critic and every scoped
-  // re-check keep the plain `${label}:critic` label.
-  const critic = (prompt, lens) => runAgent(
+  // progress tree and the journal can tell them apart. A single-drafter stage's critic and the whole-artifact
+  // re-check keep the plain `${label}:critic` label; a partitioned re-check labels each group
+  // `recheck:<lens>`. `extra` is an object of extra JSON-schema properties merged into the
+  // verdict's schema, for a lens that also returns an index of what it read; `required` stays
+  // clean and issues.
+  const critic = (prompt, lens, extra = {}) => runAgent(
     `${prompt} Set clean=true only if nothing checked is unmet. Otherwise list every unmet point in issues.`,
     {
       label: lens ? `${label}:critic:${lens}` : `${label}:critic`, phase: ph, agentType, model: M.critic,
@@ -440,7 +464,8 @@ function refineKit(agentType, schema, label, ph, artifactPath, templatePath, { d
         type: "object", required: ["clean", "issues"],
         properties: {
           clean: { type: "boolean" },
-          issues: { type: "array", items: { type: "string" } }
+          issues: { type: "array", items: { type: "string" } },
+          ...extra
         }
       }
     }
@@ -472,14 +497,18 @@ function refineKit(agentType, schema, label, ph, artifactPath, templatePath, { d
      Overwrite ${artifactPath} in place.\n${instructions}${oqInstructions(priorOQ)}${stageInstructions}`,
     { label: `${label}:revise`, phase: ph, agentType, schema, ...draftOpts }
   );
-  return { agentType, schema, label, ph, artifactPath, templatePath, draftOpts, critic, revise };
+  return { agentType, schema, label, ph, artifactPath, templatePath, draftOpts, reviseRounds, recheckScope, critic, revise };
 }
 
-// Up to 2 rounds of (revise -> scoped re-check), from a draft result and the critique of it.
-// `rounds` tells a compose path whether the round cap, not a clean re-check, ended the loop.
+// Up to kit.reviseRounds rounds of (revise -> scoped re-check), from a draft result and the
+// critique of it. The cap is per stage: 2 by default; the spec stage sets 1, because its reviser
+// rewrites the pipeline's largest artifact on its most expensive tier, and what one round leaves
+// is the orchestrator's gate to judge. `rounds` tells a compose path whether the round cap, not a
+// clean re-check, ended the loop. The re-check is one whole-artifact critic unless the kit has a
+// recheckScope, in which case it is partitioned by lens (see partitionedRecheck).
 async function reviseLoop(kit, result, critique) {
   let round = 0;
-  for (; round < 2 && critique && !critique.clean; round++) {
+  for (; round < kit.reviseRounds && critique && !critique.clean; round++) {
     // Hand the current best questions forward so a round that fixes the artifact cannot rewrite
     // the questions as a side effect; `result` is the drafter's on round 0, the prior reviser's after.
     const revised = await kit.revise(
@@ -487,16 +516,59 @@ async function reviseLoop(kit, result, critique) {
       result?.open_questions
     );
     if (revised) result = revised; // reviser skipped/died — keep the prior result rather than dropping it
-    critique = await kit.critic(   // scoped re-check so the loop can actually terminate early
-      `Read ${kit.artifactPath}. Verify each previously-raised issue below is now resolved. Check
-       only these issues. Do not open a fresh audit of the rest of the artifact.\n${critique.issues.join("; ")}`
-    );
+    critique = kit.recheckScope
+      ? await partitionedRecheck(kit, critique.issues)
+      : await kit.critic(   // scoped re-check so the loop can actually terminate early
+        `Read ${kit.artifactPath}. Verify each previously-raised issue below is now resolved. Check
+         only these issues. Do not open a fresh audit of the rest of the artifact.\n${critique.issues.join("; ")}`
+      );
   }
   return { result, critique, rounds: round };
 }
 
-async function refine(agentType, draftPrompt, critiquePrompt, schema, label, ph, artifactPath, templatePath, { draftModel, feedback, stageInstructions = "" } = {}) {
-  const kit = refineKit(agentType, schema, label, ph, artifactPath, templatePath, { draftModel, stageInstructions });
+// The lens prefix mergeCritiques() puts on every issue of a lens panel.
+const LENS_PREFIX = /^\[([^\]]+)\] /;
+
+// One scoped re-check per lens group, in parallel. Issues are grouped by their "[<lens>] "
+// prefix; issues with no prefix form one group with a whole-artifact read. Each group's critic
+// is told to verify only that group's issues within its lens's read (kit.recheckScope(lens), or
+// the whole artifact when that returns null). The verdicts fold through mergeCritiques(), so a
+// re-check's issues are re-prefixed with the lens they came from and the prefixes survive the
+// next round. A dead re-check for a group is an unknown verdict: its fallback restates the
+// group's issues, so none is dropped.
+async function partitionedRecheck(kit, issues) {
+  const groups = new Map(); // lens ("" for no prefix) -> issue texts without their prefix
+  for (const issue of issues) {
+    const m = LENS_PREFIX.exec(issue);
+    const lens = m ? m[1] : "";
+    const text = m ? issue.slice(m[0].length) : issue;
+    groups.set(lens, [...(groups.get(lens) || []), text]);
+  }
+  const entries = [...groups].map(([lens, texts]) => {
+    const scope = lens ? kit.recheckScope(lens) : null;
+    return {
+      lens, texts,
+      read: scope ? `Read ${kit.artifactPath} only within this scope: ${scope}.` : `Read ${kit.artifactPath}.`
+    };
+  });
+  const verdicts = await parallel(entries.map(({ lens, texts, read }) => () => kit.critic(
+    `${read} Verify each previously-raised issue below is now resolved. Check only these issues.
+     Do not open a fresh audit of the rest of the artifact. Return each issue still open as its
+     text alone, without a "[lens]" prefix.\n${texts.join("; ")}`,
+    `recheck:${lens || "unscoped"}`
+  )));
+  const stripOwn = (lens, s) => (lens && s.startsWith(`[${lens}] `)) ? s.slice(lens.length + 3) : s;
+  const merged = mergeCritiques(entries.map((e, i) => ({
+    lens: e.lens || null,
+    critique: verdicts[i] && { ...verdicts[i], issues: verdicts[i].issues.map((s) => stripOwn(e.lens, s)) },
+    fallback: `the re-check returned no result, so these stay open: ${e.texts.join("; ")}`
+  })));
+  log(`${kit.label} partitioned re-check: ${entries.map((e, i) => `${e.lens || "unscoped"}=${verdicts[i] ? (verdicts[i].clean ? "clean" : `${verdicts[i].issues.length} issue(s)`) : "no result"}`).join(", ")}.`);
+  return merged;
+}
+
+async function refine(agentType, draftPrompt, critiquePrompt, schema, label, ph, artifactPath, templatePath, { draftModel, feedback, stageInstructions = "", reviseRounds } = {}) {
+  const kit = refineKit(agentType, schema, label, ph, artifactPath, templatePath, { draftModel, stageInstructions, reviseRounds });
 
   if (feedback) {
     const result = await kit.revise(
@@ -524,17 +596,19 @@ function verdictNote(critique) {
 }
 
 // Folds a parallel lens panel into the one critique reviseLoop() takes. Each issue is prefixed
-// with its lens, so the reviser and the scoped re-check know which reading raised it. A dead lens
-// is an unknown verdict, never a clean one. Its `fallback` becomes an issue that restates what
-// the lens would have checked, so the re-check can still verify it. `extra` carries issues the
-// stage found in plain JS, already prefixed.
+// with its lens, so the reviser and the scoped re-check know which reading raised it; a null
+// lens (the no-prefix group of a partitioned re-check) adds no prefix. A dead lens is an unknown
+// verdict, never a clean one. Its `fallback` becomes an issue that restates what the lens would
+// have checked, so the re-check can still verify it. `extra` carries issues the stage found in
+// plain JS, already prefixed ("[check] " in the spec stage).
 function mergeCritiques(lenses, extra = []) {
   const issues = [...extra];
   let clean = extra.length === 0;
   for (const { lens, critique, fallback } of lenses) {
-    if (!critique) { clean = false; issues.push(`[${lens}] ${fallback}`); continue; }
+    const tag = lens ? `[${lens}] ` : "";
+    if (!critique) { clean = false; issues.push(`${tag}${fallback}`); continue; }
     if (!critique.clean) clean = false;
-    for (const issue of critique.issues) issues.push(`[${lens}] ${issue}`);
+    for (const issue of critique.issues) issues.push(`${tag}${issue}`);
   }
   return { clean, issues };
 }
@@ -551,6 +625,7 @@ const ANCHORED = (properties, required) => ({
   items: { type: "object", required: [...required, "anchors"], properties: { ...properties, anchors: STRINGS } }
 });
 const bullets = (lines) => lines.map((l) => `- ${l}`).join("\n");
+const quoted = (titles) => titles.map((t) => `"${t}"`).join(", ");
 const gapsBlock = (gaps) => gaps.length
   ? `--- known gaps ---\n${bullets(gaps)}\n--- end known gaps ---`
   : "There are no known gaps.";
@@ -663,11 +738,10 @@ if (stage === "triage") {
      ## VALIDATE names one frame a skeptical reader would apply. That frame must differ from the
      role in ## AS and from "what does the tree show", which is the frame ## OBSERVE already used.
 
-     OUTPUT. Write ${SPECS}/${slug}-triage.md with the template's six sections and nothing after
-     ## OUTPUT. Delete all HTML comments. Frontmatter: Slug: ${slug}, Date: ${date}, and Source:
-     the issue link or note the idea names, or the literal \`hand-seeded\` when it names none.
-     Use the six ORDER links above as the fixed names of ## ORDER's spine, and add any further
-     dependency your reasoning carried. Return what is described after the idea.
+     OUTPUT. Write ${SPECS}/${slug}-triage.md with the template's five sections and nothing
+     after ## OUTPUT. Delete all HTML comments. Frontmatter: Slug: ${slug}, Date: ${date}, and
+     Source: the issue link or note the idea names, or the literal \`hand-seeded\` when it names
+     none. Return what is described after the idea.
 
      --- raw idea ---
      ${idea}
@@ -679,9 +753,9 @@ ${LANE_TABLE}
 
      If ## AS, ## OBSERVE, or ## CONSIDERING cannot be filled honestly, write that section's
      blocking unfillable form. Do not invent a role or a lane to fill it. Examples: the idea is two
-     workstreams, the tree falsifies the premise, or the lane needs a human decision. If ## ORDER
-     as a whole or ## VALIDATE cannot be filled, write its non-blocking form. The template states
-     what each form forces on Status, Lane, Branch, and ## OUTPUT.
+     workstreams, the tree falsifies the premise, or the lane needs a human decision. If
+     ## VALIDATE cannot be filled, write its non-blocking form. The template states what each
+     form forces on Status, Lane, Branch, and ## OUTPUT.
      ${OQ_GUIDANCE}${TRIAGE_MIRROR}${TRIAGE_STATUS}`,
     `AS. You are an adversarial critic.
 
@@ -700,9 +774,9 @@ ${LANE_TABLE}
      2. failures -> issues. Each issue names the section and the unmet rule.
 
      VALIDATE. Every issue must survive a re-read against the template's own words, not your
-     preference. A path shared by **While excluding** and **Adjacent systems** is legal. An extra
-     X -> Y link in ## ORDER is legal. A ## AS role that names no lane (an unlaned agent, or
-     manual) is not a routed outcome, and belongs in that section's blocking form.
+     preference. A path shared by **While excluding** and **Adjacent systems** is legal. A ## AS
+     role that names no lane (an unlaned agent, or manual) is not a routed outcome, and belongs
+     in that section's blocking form.
 
      OUTPUT. Return clean and issues.
 
@@ -1117,8 +1191,8 @@ if (stage === "scope") {
     log(`scope lens critics: ${lensSummary(lenses, verdicts)}.`);
 
     const loop = await reviseLoop(kit, result, critique);
-    if (loop.rounds === 2 && loop.critique && !loop.critique.clean) {
-      log(`scope revise loop stopped at its 2-round cap with ${loop.critique.issues.length} issue(s) still flagged.`);
+    if (loop.rounds === kit.reviseRounds && loop.critique && !loop.critique.clean) {
+      log(`scope revise loop stopped at its ${kit.reviseRounds}-round cap with ${loop.critique.issues.length} issue(s) still flagged.`);
     }
     return { ...loop, uncoveredAnchors };
   };
@@ -1180,43 +1254,41 @@ if (stage === "scope") {
 // There is one compose path, and it scales with the plan. A small scope gets one partition and
 // so one drafter; a large one gets up to MAX_SPEC_PARTITIONS. Each drafter returns its design
 // elements, current state, and full phase blocks as fragments. One synthesizer writes the file.
-// Parallel lens critics then audit it: the template, each partition's phases as their narrowest
-// reader sees them, each partition's scope fidelity, and cross-partition coherence. A dead plan
-// agent ends the stage with an error rather than drafting with no frame. A feedback round is
-// unchanged.
+//
+// A four-lens critic panel then audits it. The agent count is a function of the plan, and each
+// agent's read is bounded at every spec size:
+//   phases:<partition id>   one per partition with phases (plus phases:unassigned for phases no
+//                           partition owns): reads only its phase blocks, the ### headings under
+//                           ## Proposed Design, ## Terminology, and the scope's ## Non-Goals.
+//                           Owns the phase-block rules and the acceptance-criteria rule. Returns
+//                           an index of what it read (agent, depends_on, design, scope_in_paths,
+//                           criteria_count, test_runs).
+//   template                one: reads everything above ## Implementation Plan plus
+//                           ## Standards References and ## Open Questions, never the phase
+//                           blocks. Owns the document-level Part A bullets. Returns the
+//                           ### headings under ## Proposed Design.
+//   fidelity:<partition id> one per partition (plus fidelity:unassigned): reads its scope goals,
+//                           ### Goals, its design subsections, and its phases. Owns scope fidelity
+//                           and the agreement between each phase and the subsections its Design
+//                           line names.
+//   coherence               one, run after the others as a second hop, only when the plan has
+//                           more than one partition (at one there are no drafter seams): reads
+//                           only the grep hits of the shared files and cross-cutting decisions
+//                           the other lenses' indexes and the plan name, plus ## Terminology.
+// Plain-JS checks over the returned indexes ("[check] " issues) cover agent names, Design
+// headings, Depends on order, the criteria cap, and whole-suite test runs, and compute the
+// shared-file list the coherence lens reads. One revise round follows, then one re-check per
+// lens group within that lens's read (partitionedRecheck), its issues re-prefixed with the
+// lens they came from. A dead plan agent ends the stage with
+// an error rather than drafting with no frame. A feedback round is unchanged.
 if (stage === "spec") {
   phase("Spec");
   const specPath = `${SPECS}/${slug}.md`;
   const specTemplate = `${SPECS}/spec-template.md`;
-  const SPEC_CRITIQUE =
-    `AS. You are an adversarial critic.
-
-     OBSERVE. Read ${SPECS}/${slug}.md.
-
-     CONSIDERING. Use Part A of the Composition-Time Self-Check in ${SPECS}/spec-template.md.
-     Use the rules in each phase block's comments. ${openRules("any phase's Scope IN")}
-
-     ORDER.
-     1. Each Part A bullet -> the artifact line that satisfies or fails it.
-     1b. The Proposed Design and each phase -> conformance to every rule file you opened.
-     2. Every Agent routing line -> exactly one bare agent name from this list:
-        ${ROUTABLE.join(", ")}. The line has no parenthetical. It has no trailing clause. It
-        names no second agent. It does not say "manual".
-     3. Every Acceptance Criteria block -> adjudicable from its own text plus the tree. Every
-        test run it names is a targeted selection. It never names ${WHOLE_SUITE.join("; ")}; or
-        any invocation that collects a whole suite. The whole suite belongs to the
-        validate stage. Every constraint on how a file changed is stated by content, not by
-        \`git diff\` against HEAD. That diff judges every phase since the last commit. Two diff
-        shapes are sound. The first is an empty \`git diff <path>\` for a path no phase may
-        touch. The second is \`git diff --name-only <commit>..HEAD\`, which names its baseline.
-     4. Failures -> issues. Each issue names the section and the unmet rule.
-
-     VALIDATE. Every issue must name the template rule or ${c.rules_dir}/ file it rests on.
-
-     OUTPUT. Return clean and issues.`;
   // The spec return deliberately carries no phases array: the implement stage's `phases` are
-  // always reconstructed by the orchestrator from the on-disk spec's "**Agent routing**:" lines,
-  // so a return value that could diverge from the file has nothing to feed.
+  // always reconstructed by the orchestrator from the on-disk spec's phase blocks (headings,
+  // "**Agent routing**:" and "**Design**:" lines, Scope, Acceptance Criteria), so a return value
+  // that could diverge from the file has nothing to feed.
   const SPEC_SCHEMA = {
     type: "object",
     required: ["spec_path", "open_questions"],
@@ -1232,36 +1304,9 @@ if (stage === "spec") {
   // write the acceptance criteria. By default these are the pipeline's only top-tier calls and its
   // most valuable model spend. A subtle spec defect costs far more in failed implement phases
   // than the draft-time premium.
-  const specOpts = { draftModel: M.spec, stageInstructions: SPEC_REVISER_CONTRACT };
-
-  const titlesOf = (group) => group.map((p) => `"${p.title}"`).join(", ");
-  const narrowestReaderCritique = (group) =>
-    `AS. You are the narrowest reader of ${group.length} phase block(s) of ${specPath}: the
-     implement-stage dev agent and criteria checker.
-
-     OBSERVE. Open ${specPath} only to extract the phase blocks titled ${titlesOf(group)}. Read
-     nothing else in the spec. Judge each block as if the rest of the file did not exist.
-
-     CONSIDERING. Use the rules in the phase-block comments of ${specTemplate}.
-     ${openRules("these phases' Scope IN")} Use the working tree.
-
-     ORDER.
-     1. The Agent routing line -> exactly one bare agent name from this list:
-        ${ROUTABLE.join(", ")}. No parenthetical, no trailing clause, no second agent, no "manual".
-     2. #### Scope IN and OUT -> enumerated repo-rooted paths, each resolving on the tree or named
-        as created.
-     3. #### Tests -> co-located, one line per IN behaviour, each naming what it catches, or the
-        covered-by or unfillable form.
-     4. #### Acceptance Criteria -> each criterion adjudicable from its own text plus the tree: no
-        "Phase N", no ## Section reference, no unnamed referent. Every test run is a targeted
-        selection, never ${WHOLE_SUITE.join("; ")}; or any invocation that collects a whole
-        suite. Every constraint on how a file changed is stated by content, not by \`git diff\`
-        against HEAD, except an empty \`git diff <path>\` or \`git diff --name-only <commit>..HEAD\`.
-
-     VALIDATE. A later checker sees only your issue text and the file. So every issue names the
-     phase heading, the block, and the template rule it rests on.
-
-     OUTPUT. Return clean and issues.`;
+  // One revise round: the orchestrator's gate, not a second top-tier rewrite, judges what the
+  // re-check still flags.
+  const specOpts = { draftModel: M.spec, stageInstructions: SPEC_REVISER_CONTRACT, reviseRounds: 1 };
 
   // The plan fixes the frame every drafter shares, because drafters run in parallel and see only
   // the plan. Anchors are the scope's goals, so "was a goal dropped?" is a set difference. Phase
@@ -1363,7 +1408,7 @@ if (stage === "spec") {
       terminology:  { type: "array", items: { type: "object", required: ["term", "definition"], properties: { term: S, definition: S } } },
       phases: ANCHORED({
         title:   S,
-        body_md: { type: "string", description: "Everything under the phase heading: **Goal**, **Agent routing**, **Depends on**, #### Scope, #### Tasks, #### Tests, #### Acceptance Criteria." }
+        body_md: { type: "string", description: "Everything under the phase heading: **Goal**, **Agent routing**, **Depends on**, **Design**, #### Scope, #### Tasks, #### Tests, #### Acceptance Criteria." }
       }, ["title", "body_md"]),
       standards: { type: "array", items: { type: "object", required: ["doc", "section", "applies_to"], properties: { doc: S, section: S, applies_to: S } } },
       interface_notes: { ...STRINGS, description: "What this partition assumes from, or provides to, another partition beyond the plan's cross-cutting decisions." },
@@ -1371,12 +1416,12 @@ if (stage === "spec") {
       no_spec_consequence: { type: "array", items: { type: "object", required: ["anchor", "reason"], properties: { anchor: S, reason: S } } }
     }
   };
-  const quoted = (titles) => titles.map((t) => `"${t}"`).join(", ");
   const outlineBlock = (plan) => {
     const owner = (t) => plan.partitions.find((p) => p.phases.includes(t))?.id || "no partition";
     return `--- phase outline ---\n${bullets(plan.phases.map((ph) => `${ph.title} | ${ph.agent} | depends on: ${ph.depends_on} | delivers: ${ph.anchors.join(", ") || "none"} | drafted by: ${owner(ph.title)} | ${ph.goal}`))}\n--- end phase outline ---`;
   };
   const principleBlock = (plan) => `--- core principle ---\n${plan.core_principle}\n--- end core principle ---`;
+  const designBlock = (plan) => `--- design subsections ---\n${bullets(plan.partitions.map((p) => `${p.id}: ${p.design_elements.join("; ") || "none"}`))}\n--- end design subsections ---`;
 
   const specPartitionDraft = (p, plan) =>
     `AS. ${roleOf(architect)} You draft partition "${p.id}: ${p.title}" of the spec for workstream
@@ -1392,11 +1437,12 @@ if (stage === "spec") {
      CONSIDERING. Your anchors are ${p.anchors.join(", ") || "none"}. Your phases are
      ${quoted(p.phases) || "none"}. Your Proposed Design subsections are
      ${p.design_elements.join("; ") || "none"}. Your surfaces are ${p.surfaces.join(", ")}. Use
-     ${specTemplate} for what each section and each phase block must be. The template says who
-     reads each phase block. The dev agent gets #### Scope inlined as its boundary. The criteria
-     checker gets #### Acceptance Criteria alone, and its verdict halts every later phase.
-     ${openRules("your surfaces")} Use the working tree. Acceptance criteria obey the implement
-     stage's test policy:\n${SCOPED_TESTS}
+     ${specTemplate} for what each section and each phase block must be. The template
+     says who reads each phase block. The dev agent gets #### Scope inlined as its boundary and is
+     sent, by heading, to exactly the ## Proposed Design subsections the phase's **Design** line
+     names; it reads no other design text. The criteria checker gets #### Acceptance Criteria
+     alone, and its verdict halts every later phase. ${openRules("your surfaces")} Use the working
+     tree. Acceptance criteria obey the implement stage's test policy:\n${SCOPED_TESTS}
 
      ORDER.
      1. Each anchor -> the scope goal text, and the source text it cites.
@@ -1404,11 +1450,14 @@ if (stage === "spec") {
      3. Anchors -> your Proposed Design subsections, consistent with the core principle and every
         cross-cutting decision. Approaches you rejected -> alternatives.
      4. Each of your phases -> its full block, with the plan's title, Agent routing, and Depends on
-        unchanged: **Goal**; **Agent routing**; **Depends on**; #### Scope with IN and OUT as
-        enumerated repo-rooted paths; #### Tasks; #### Tests, one line per IN behaviour; and
-        #### Acceptance Criteria, each criterion adjudicable from its own text plus the tree and
-        carrying the full check recipe for each goal the phase delivers, every test run a
-        targeted selection.
+        unchanged: **Goal**; **Agent routing**; **Depends on**; **Design**, naming by exact
+        heading the Proposed Design subsections the phase implements, from the design subsections
+        listed below (yours or another partition's), separated by "; ", or None; #### Scope with
+        IN and OUT as enumerated repo-rooted paths; #### Tasks; #### Tests, one line per IN
+        behaviour; and #### Acceptance Criteria: at most six, one check per bullet, each
+        adjudicable from its own text plus the tree and passing or failing on what the code does
+        (a named test selection, a stated output on a program path, a benchmark threshold), never
+        on code shape alone; every test run a targeted selection.
      5. Anything you assume from or provide to another partition beyond the cross-cutting
         decisions -> interface_notes.
      6. Each anchor -> at least one phase or open question whose anchors list it, or a
@@ -1419,13 +1468,15 @@ if (stage === "spec") {
      goal or reaches a scope non-goal. No item contradicts a cross-cutting decision. No phase
      number appears in an identifier, filename, comment, or docstring.
 
-     OUTPUT. Do not write or edit any file. The synthesizer alone writes ${specPath}, and a
-     second writer would lose its updates. Return the fragments. Each phase's title is character
-     for character the plan's. No body_md carries an HTML comment.
+     OUTPUT. Do not write or edit any file. The synthesizer alone writes ${specPath},
+     and a second writer would lose its updates. Return the fragments. Each phase's title is
+     character for character the plan's. No body_md carries an HTML comment. Every heading on a
+     **Design** line is one listed in the design subsections below, character for character.
      ${OQ_GUIDANCE}
      ${outlineBlock(plan)}
      ${principleBlock(plan)}
-     ${crossCuttingBlock(plan)}`;
+     ${crossCuttingBlock(plan)}
+     ${designBlock(plan)}`;
 
   const specSynthesize = (plan, fragments, gaps) =>
     `AS. ${roleOf(architect)} You write the spec for workstream "${slug}" from the fragments of
@@ -1441,8 +1492,9 @@ if (stage === "spec") {
      cross-cutting decision, and then only the lines the conflict touches. The known gaps below
      are anchors or phases no fragment covers, or that the plan assigned to no partition or to
      more than one. For each gap, read the scope and the source it cites, then land it. Write a
-     missing phase in full from the plan's outline. Land an anchor in a phase, a goal, or an open
-     question. Never drop a gap silently.
+     missing phase in full from the plan's outline, its **Design** line naming its owning
+     partition's design subsections. Land an anchor in a phase, a goal, or an open question. Never
+     drop a gap silently.
 
      ORDER.
      1. Scope -> ## Executive Summary, ### Goals, ### Non-Goals, and ### Dependencies, faithful to
@@ -1451,13 +1503,16 @@ if (stage === "spec") {
      3. Fragments -> ## Current State, its subsections merged, then ### Problems Summary.
      4. The core principle and the design elements -> ## Proposed Design: ### Core Principle
         first, then the elements in dependency order, then ### System Boundaries merged from every
-        fragment's boundaries.
+        fragment's boundaries. Keep each subsection heading as its drafter wrote it; where you
+        must merge or rename subsections, update every phase **Design** line that names them.
      5. Fragments -> ## Alternatives Considered, merged.
      6. The design -> ## Invariance. Give one independent reframing. State the claim that survives
         it. Name one concrete falsifier on ${SURFACE}.
      7. Phase blocks -> ## Implementation Plan, in the plan's order, each under its plan title.
         Where two partitions' interface_notes disagree, reconcile the lines the disagreement
         touches, or raise it as an open question. Do not settle a design conflict silently.
+        Every **Design** line names only headings present under ## Proposed Design, character
+        for character, or None.
      8. Fragments -> ## Standards References, merged.
      9. Open questions -> merged and numbered in ## Open Questions, or the explicit no-questions
         sentence.
@@ -1475,20 +1530,28 @@ if (stage === "spec") {
      ${outlineBlock(plan)}
      ${principleBlock(plan)}
      ${crossCuttingBlock(plan)}
+     ${designBlock(plan)}
      ${gapsBlock(gaps)}
      --- fragments ---
      ${JSON.stringify(fragments, null, 2)}
      --- end fragments ---`;
 
+  // The fidelity lens's read, shared by its full audit and its re-check. It is narrowed to the
+  // partition: its design subsections plus whatever its phases' Design lines name, never all of
+  // ## Proposed Design.
+  const fidelityRead = (p) =>
+    `${SPECS}/${slug}-scope.md: the ## Goals entries for ${p.anchors.join(", ") || "no anchor"}, all of
+     ## Non-Goals, and the closed ## Open Questions entries; ${p.source_sections.join("; ")};
+     ${SPECS}/${slug}.md: ### Goals, under ## Proposed Design only ${p.design_elements.length ? `the subsections titled ${quoted(p.design_elements)}` : "no subsection of this partition's own"}
+     plus any subsection a **Design** line of your phases names, and ${p.phases.length ? `the phase blocks titled ${quoted(p.phases)}` : "whichever phase blocks deliver the anchors"}`;
   const specFidelityCritique = (p, plan, gaps) =>
     `AS. You are a scope-fidelity critic for partition "${p.id}: ${p.title}" of the spec for
      workstream "${slug}".
 
-     OBSERVE. Read ${SPECS}/${slug}-scope.md: the ## Goals entries for the anchors below, all of
-     ## Non-Goals, and the closed ## Open Questions entries. Read these: ${p.source_sections.join("; ")}.
-     Read ${specPath}: ### Goals, ## Proposed Design, and ${p.phases.length ? `the phases titled ${quoted(p.phases)}` : "whichever phases deliver the anchors below"}.
+     OBSERVE. Read only these: ${fidelityRead(p)}. Do not read the rest of ## Proposed Design or
+     the other phases.
 
-     CONSIDERING. The anchors to check are ${p.anchors.join(", ")}. "G<n>" is scope goal n.
+     CONSIDERING. The anchors to check are ${p.anchors.join(", ") || "none"}. "G<n>" is scope goal n.
      "OQ<n>" is closed scope question n. The scope binds the spec. A divergence the spec raises as
      a numbered ## Open Questions entry is not silent. The known gaps below were found before the
      spec was written. Check those that name one of your anchors or phases.
@@ -1501,50 +1564,195 @@ if (stage === "spec") {
         anchor the design carries but no phase delivers -> an issue.
      4. Each of your phases -> its Scope IN reaches no scope ## Non-Goals entry.
      5. Each cross-cutting decision -> no line of your phases or design contradicts it.
+     6. Each of your phases -> its #### Tasks and Scope IN agree with the subsections its
+        **Design** line names: the same mechanism, names, signatures, and layouts. A disagreement
+        is an issue naming the phase heading, the subsection heading, and both lines.
 
      VALIDATE. A later checker sees only your issue text and the spec, never this partition. So
      every issue names the scope goal or non-goal by number, what the scope commits to in one
      sentence, and the spec section and phase heading where it lands or is missing. Do not audit
-     template form or single-phase readability. Other critics own those.
+     template form, phase-block form, or cross-phase seams. The template, phases, and coherence
+     lenses own those.
 
      OUTPUT. Return clean and issues.
      ${crossCuttingBlock(plan)}
      ${gapsBlock(gaps)}`;
 
-  const specCoherenceCritique = (plan) =>
-    `AS. You are a cross-partition coherence critic. ${specPath} was drafted by
-     ${plan.partitions.length} drafter(s) in parallel and merged by a synthesizer, so its seams
-     are where it breaks.
+  // The acceptance-criteria rule the phases lens enforces. <specs_dir>/spec-template.md's
+  // #### Acceptance Criteria comment states the same rule, and the two must agree.
+  const CRITERIA_RULE =
+    `ACCEPTANCE CRITERIA RULE.
+     1. A criterion passes or fails on what the code does: a named test selection that exits 0,
+        a command on a program path whose output is stated (a route response, a CLI's stdout, a
+        file the run writes, a record that reloads), or a benchmark threshold.
+     2. Introspection of definitions is a shape check however it is run: reflection over a
+        type's fields or flags, a grep -c of function or class definitions, a symbol's presence
+        or line count, a constant list compared literal-for-literal, a type's field order, a file
+        hash. Each is an issue. Name the test that already asserts it instead.
+     3. The one allowed shape check is an absence grep that must print nothing, for one of: a
+        symbol this phase's IN retires, an OUT exclusion, a scope ## Non-Goals entry, or a
+        ${c.steering.file} constraint cited by section heading. The criterion says which.
+     4. One command or one test selection per bullet. Several assertions on that one command's
+        output are one criterion. At most six bullets per phase.
+     5. No reference to any spec heading at any level, and no referent the bullet does not name
+        by path or symbol.
+     6. Every test run is a targeted selection: never ${WHOLE_SUITE.join("; ")}; or any
+        invocation that collects a whole suite. Constraints on how a file changed are stated by content, not
+        by git diff against HEAD; the two sound diff shapes are an empty git diff <path> for a
+        path no phase may touch, and git diff --name-only <commit>..HEAD.
+     7. A phase over the cap is first collapsed into the named tests that already assert its
+        checks. A genuine split is a plan change: the critic raises it as an issue, the reviser
+        never splits, merges, or renumbers phases, and the issue reaches the orchestrator's gate.`;
 
-     OBSERVE. Read ${specPath} in full. Read ${SPECS}/${slug}-scope.md ## Non-Goals. Use the
-     working tree.
+  // The phases lens's read, shared by its full audit and its re-check.
+  const phasesRead = (titles) =>
+    `the phase blocks titled ${quoted(titles)} under ## Implementation Plan, each from its
+     "### Phase n:" heading to the next "### Phase" or "## " heading; the "### " heading lines
+     under ## Proposed Design (grep -n '^### ' ${SPECS}/${slug}.md, to verify Design lines);
+     ## Terminology; and ${SPECS}/${slug}-scope.md ## Non-Goals`;
+  // The index a phases lens returns beside its verdict, for the plain-JS checks below.
+  const PHASES_INDEX = {
+    phases: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["title", "agent", "depends_on", "design", "scope_in_paths", "criteria_count", "test_runs"],
+        properties: {
+          title:          { type: "string", description: "The heading text after \"### \"." },
+          agent:          { type: "string", description: "The Agent routing line's value as written." },
+          depends_on:     { ...STRINGS, description: "The phase titles the Depends on line names, as written; [] for None." },
+          design:         { ...STRINGS, description: "The headings the Design line names, as written; [] for None." },
+          scope_in_paths: { ...STRINGS, description: "Every repo path Scope IN names." },
+          criteria_count: { type: "integer", description: "The number of bullets under Acceptance Criteria." },
+          test_runs:      { ...STRINGS, description: "Every command in Acceptance Criteria that runs tests, each as written." }
+        }
+      }
+    }
+  };
+  const specPhasesCritique = (titles, plan) =>
+    `AS. You are the narrowest reader of ${titles.length} phase block(s) of ${SPECS}/${slug}.md:
+     the implement-stage dev agent and criteria checker.
 
-     CONSIDERING. The plan's partitions and cross-cutting decisions are below.
+     OBSERVE. Open ${SPECS}/${slug}.md only to read ${phasesRead(titles)}. Read nothing else
+     in the spec. Judge each block as if the rest of the file did not exist. The phase outline
+     below says what every phase creates, so a Scope IN path or a covered-by test that this or an
+     earlier phase creates is recognised, not flagged as unresolved. Use the working tree.
+
+     CONSIDERING. Use the rules in the phase-block comments of ${specTemplate}.
+     ${openRules("these phases' Scope IN")}
+     ${CRITERIA_RULE}
 
      ORDER.
-     1. Each **Depends on** line -> names only earlier phases. Each phase's Scope IN uses only
-        what earlier phases or the tree provide.
-     2. Each name, signature, data layout, constant, and ordering a cross-cutting decision fixes
-        -> used identically in every section and phase that names it.
-     3. Each file in more than one phase's Scope IN -> the phases' changes to it are compatible and
-        ordered, and no later phase undoes an earlier one.
-     4. ## Terminology, ## Proposed Design, and the phases -> one term per concept.
-     5. Each scope ## Non-Goals entry -> no goal, design element, or phase Scope IN reaches it.
-     6. ## Invariance -> present, with a reframing, a surviving claim, and a concrete falsifier,
-        or "not yet identified" with a matching ## Open Questions entry.
-     7. Failures -> issues.
+     1. The **Agent routing** line -> exactly one bare agent name from this list:
+        ${ROUTABLE.join(", ")}. No parenthetical, no trailing clause, no second agent, no "manual".
+     2. The **Design** line -> names headings that exist under ## Proposed Design character for
+        character, separated by "; ", or reads exactly None.
+     3. #### Scope IN and OUT -> enumerated repo-rooted paths, each resolving on the tree or
+        named as created by this phase or an earlier one in the outline.
+     4. #### Tests -> co-located, one line per IN behaviour, each naming what it catches; or the
+        covered-by form, after opening the named test when it is on the tree and confirming it
+        fails for that condition; or the unfillable form.
+     5. #### Acceptance Criteria -> every numbered point of the rule above. A phase over the cap
+        whose checks named tests already assert -> an issue saying which to collapse. A phase
+        that needs a split -> an issue saying so, for the orchestrator's gate.
+     6. Any DETAIL-PENDING line -> an issue.
 
-     VALIDATE. Each issue names both sides of the seam: the two sections or phase headings and the
-     conflicting lines. Do not audit template form, single-phase readability, or per-goal
-     fidelity. Other critics own those.
+     VALIDATE. A later checker sees only your issue text and the file. So every issue names the
+     phase heading, the block, and the rule it rests on.
+
+     OUTPUT. Return clean, issues, and phases: one entry per block you read, in file order, with
+     title, agent (the Agent routing line as written), depends_on (the titles the Depends on line
+     names, [] for None), design (the headings the Design line names, [] for None),
+     scope_in_paths (every repo path IN names), criteria_count (the bullets under Acceptance
+     Criteria), and test_runs (every command that runs tests, each as written).
+     ${outlineBlock(plan)}`;
+
+  // The template lens's read, shared by its full audit and its re-check.
+  const TEMPLATE_READ =
+    `every section above ## Implementation Plan, then ## Standards References and
+     ## Open Questions, and never the phase blocks`;
+  const DESIGN_INDEX = {
+    design_headings: { ...STRINGS, description: "Every \"### \" heading under ## Proposed Design, in file order, without the \"### \"." }
+  };
+  const SPEC_TEMPLATE_CRITIQUE =
+    `AS. You are the template critic for ${SPECS}/${slug}.md: its document-level form, judged
+     against the design it states.
+
+     OBSERVE. Read ${SPECS}/${slug}.md only for ${TEMPLATE_READ}. Read
+     ${SPECS}/${slug}-scope.md ## Non-Goals. Use the working tree.
+
+     CONSIDERING. Use Part A of the Composition-Time Self-Check in ${specTemplate}
+     and the per-section rules in that template's comments, for the sections you read. The phase
+     blocks have their own critics. ${openRules("the surfaces ## Proposed Design names")}
+
+     ORDER.
+     1. The target region -> concrete: a reader could describe success without the spec.
+     2. Scope boundaries -> explicit at the design level: ### System Boundaries states what the
+        design affects and does not affect.
+     3. Dependencies -> ordered: information flows context -> decisions -> implementation, and no
+        section you read names "Phase <n>" as a forward reference.
+     4. Each ## Alternatives Considered entry -> names an approach an agent could plausibly have
+        proposed instead.
+     5. ## Invariance -> present, with a reframing, a surviving claim, and a concrete falsifier,
+        or "not yet identified" with a matching ## Open Questions entry.
+     6. ## Open Questions -> in one of its three shapes.
+     7. The goals -> simultaneously satisfiable, with no conflicting constraints.
+     8. ## Standards References -> cited by name and pruned by relevance, judged against the
+        design you read: a row the design does not touch is an issue, and a surface the design
+        touches with no row is an issue.
+     9. The metadata block -> carries **Status**: Draft.
+     10. The "### " headings under ## Proposed Design -> unique.
+     11. ## Terminology and the sections you read -> one term per concept.
+     12. Each scope ## Non-Goals entry -> no goal or design element reaches it.
+     13. Failures -> issues, each naming the section and the unmet rule.
+
+     VALIDATE. Every issue names the template rule or ${c.rules_dir}/ file it rests on. Do not
+     audit phase blocks, scope fidelity, or cross-phase seams. Other lenses own those.
+
+     OUTPUT. Return clean, issues, and design_headings: every "### " heading under
+     ## Proposed Design, in file order, character for character without the "### ".`;
+
+  // The coherence lens's read, shared by its full audit and its re-check. It takes the
+  // JS-computed shared-file list: files named in more than one phase's Scope IN, with the phases.
+  const sharedFilesBlock = (shared) => shared.length
+    ? `--- shared files ---\n${bullets(shared.map((s) => `${s.path}: ${quoted(s.phases)}`))}\n--- end shared files ---`
+    : "No file is named in more than one phase's Scope IN.";
+  const coherenceRead = (shared) =>
+    `for each shared file below, the lines of the phases named with it that mention that file
+     (grep -n the path, keep the hits inside those phase blocks); for each cross-cutting decision
+     below, every hit of its name, signature, or constant across the file (grep -n); and
+     ## Terminology. Nothing else.
+     ${sharedFilesBlock(shared)}`;
+  const specCoherenceCritique = (plan, shared) =>
+    `AS. You are the cross-partition coherence critic for ${SPECS}/${slug}.md.
+     ${plan.partitions.length} drafters wrote it in parallel and a synthesizer merged it, so its
+     seams are where it breaks.
+
+     OBSERVE. Read ${SPECS}/${slug}.md only for these: ${coherenceRead(shared)}
+     Use the working tree where a name must be checked against a signature.
+
+     CONSIDERING. The cross-cutting decisions are below. Each shared file is named in more than
+     one phase's Scope IN, and the phases are listed with it.
+
+     ORDER.
+     1. Each shared file -> the named phases' changes to it are compatible and ordered, and no
+        later phase undoes an earlier one.
+     2. Each name, signature, data layout, constant, and ordering a cross-cutting decision
+        fixes -> used identically at every hit.
+     3. Each term ## Terminology defines -> not used for a different concept in any phase line
+        you read.
+     4. Failures -> issues.
+
+     VALIDATE. Each issue names both sides of the seam: the two phase headings or sections and
+     the conflicting lines. Do not check ## Invariance, Depends on ordering, or scope
+     ## Non-Goals. Other lenses and the stage's own checks own those.
 
      OUTPUT. Return clean and issues.
-     --- partitions ---\n${bullets(plan.partitions.map((p) => `${p.id}: ${p.title}, phases ${quoted(p.phases) || "none"}`))}\n--- end partitions ---
      ${crossCuttingBlock(plan)}`;
 
   // Plain-JS check of the plan's phase outline and phase assignment. Each line goes to the
   // synthesizer and the critics as a known gap. `unowned` phases have no drafter, so the
-  // synthesizer writes them and a narrowest-reader lens of their own audits them.
+  // synthesizer writes them from the outline and the return reports them as `phase: <title>` entries.
   const phaseGaps = (plan) => {
     const owners = new Map();
     for (const p of plan.partitions) for (const t of new Set(p.phases)) owners.set(t, [...(owners.get(t) || []), p.id]);
@@ -1556,6 +1764,11 @@ if (stage === "spec") {
       seen.add(t);
       const m = /^Phase (\d+): \S/.exec(t);
       if (!m || Number(m[1]) !== i + 1) lines.push(`phase "${t}": its title is not "Phase ${i + 1}: <name>" at outline position ${i + 1}.`);
+      // Depends on may name only earlier phases. Checked here, before drafting, so a backward
+      // outline never reaches the drafters.
+      for (const d of String(ph.depends_on || "").matchAll(/Phase (\d+)/g)) {
+        if (Number(d[1]) >= i + 1) lines.push(`phase "${t}": its Depends on names Phase ${d[1]}, which is not earlier than it.`);
+      }
       if (!owners.has(t)) lines.push(`phase "${t}": the plan assigned it to no partition, so no drafter wrote it.`);
       else if (owners.get(t).length > 1) lines.push(`phase "${t}": the plan assigned it to partitions ${owners.get(t).join(" and ")}. Keep one block for it.`);
     });
@@ -1564,7 +1777,11 @@ if (stage === "spec") {
   };
 
   const composePartitioned = async (plan, gaps, pGaps) => {
-    const kit = refineKit(architect, SPEC_SCHEMA, "spec", "Spec", specPath, specTemplate, specOpts);
+    // Every lens's read instruction, keyed by lens name, filled in as the panel is built. The
+    // partitioned re-check sends each group's re-check to the same read its full audit had.
+    // "check" findings are string-exact and may sit anywhere, so their re-check reads the file.
+    const reads = new Map([["check", "the whole file: these findings are string-exact and may sit anywhere in it"]]);
+    const kit = refineKit(architect, SPEC_SCHEMA, "spec", "Spec", specPath, specTemplate, { ...specOpts, recheckScope: (lens) => reads.get(lens) ?? null });
     const fragments = await parallel(plan.partitions.map((p) => () => runAgent(
       specPartitionDraft(p, plan),
       { label: `spec:draft:${p.id}`, phase: "Spec", agentType: architect, schema: SPEC_FRAGMENT_SCHEMA, ...kit.draftOpts }
@@ -1623,47 +1840,101 @@ if (stage === "spec") {
     const uncoveredAnchors = [...uncovered.map((u) => u.anchor), ...missingPhases.map((m) => `phase: ${m.title}`)];
     if (!result) return { result: null, critique: null, uncoveredAnchors };
 
-    // Unassigned anchors belong to no partition, and unowned phases had no drafter, so each gets a
-    // lens of its own rather than going unchecked.
+    // Unassigned anchors belong to no partition, so no partition's fidelity critic would check
+    // them. They get a fidelity lens of their own rather than going unchecked. Unowned phases had
+    // no drafter, so they get a phases lens of their own for the same reason.
     const fidelityTargets = [...plan.partitions];
     if (gaps.unassigned.length) {
       fidelityTargets.push({
-        id: "unassigned", title: "anchors the plan assigned to no partition", phases: [],
+        id: "unassigned", title: "anchors the plan assigned to no partition", phases: [], design_elements: [],
         source_sections: [`${SPECS}/${slug}-scope.md ## Goals; locate each anchor there`],
         anchors: gaps.unassigned
       });
     }
-    const readerGroups = plan.partitions
+    const phaseGroups = plan.partitions
       .filter((p) => p.phases.length)
-      .map((p) => ({ id: p.id, group: p.phases.map((t) => ({ title: t })) }));
-    if (pGaps.unowned.length) readerGroups.push({ id: "unassigned", group: pGaps.unowned.map((t) => ({ title: t })) });
+      .map((p) => ({ id: p.id, titles: p.phases }));
+    if (pGaps.unowned.length) phaseGroups.push({ id: "unassigned", titles: pGaps.unowned });
 
     const lenses = [
+      ...phaseGroups.map(({ id, titles }) => ({
+        lens: `phases:${id}`, read: phasesRead(titles),
+        run: () => kit.critic(specPhasesCritique(titles, plan), `phases:${id}`, PHASES_INDEX),
+        fallback: `The phases critic for ${quoted(titles)} returned no result, so those blocks are unaudited. Check each one's Agent routing line, Design line, Scope IN and OUT paths, Tests, and Acceptance Criteria against ${specTemplate}'s phase-block rules, reading only that block.`
+      })),
       {
-        lens: "template", run: () => kit.critic(SPEC_CRITIQUE, "template"),
-        fallback: `The template critic returned no result, so this lens is unaudited. Audit ${specPath} against every Part A bullet of ${specTemplate}'s Composition-Time Self-Check.`
+        lens: "template", read: TEMPLATE_READ,
+        run: () => kit.critic(SPEC_TEMPLATE_CRITIQUE, "template", DESIGN_INDEX),
+        fallback: `The template critic returned no result, so this lens is unaudited. Audit the sections of ${specPath} above ## Implementation Plan, plus ## Standards References and ## Open Questions, against every document-level Part A bullet of ${specTemplate}'s Composition-Time Self-Check, and check that the ### headings under ## Proposed Design are unique.`
       },
-      ...readerGroups.map(({ id, group }) => ({
-        lens: `phases:${id}`, run: () => kit.critic(narrowestReaderCritique(group), `phases:${id}`),
-        fallback: `The narrowest-reader critic for phases ${titlesOf(group)} returned no result, so those blocks are unaudited. Check each one's Agent routing line, Scope IN and OUT paths, Tests, and Acceptance Criteria against ${specTemplate}'s phase-block rules, reading only that block.`
-      })),
       ...fidelityTargets.map((p) => ({
-        lens: `fidelity:${p.id}`, run: () => kit.critic(specFidelityCritique(p, plan, knownGaps), `fidelity:${p.id}`),
-        fallback: `The scope-fidelity critic for partition "${p.id}" returned no result, so its anchors are unaudited. Confirm each of ${p.anchors.join(", ")} (scope goal G<n> or closed question OQ<n> in ${SPECS}/${slug}-scope.md) lands in ${specPath} as a goal delivered by a phase, or as an open question, neither widened nor narrowed.`
-      })),
-      {
-        lens: "coherence", run: () => kit.critic(specCoherenceCritique(plan), "coherence"),
-        fallback: `The coherence critic returned no result, so this lens is unaudited. Check that every Depends on line in ${specPath} names only earlier phases, every cross-cutting name and layout is used identically, no two phases' Scope IN changes to one file conflict, no scope ## Non-Goals entry is reached, and ## Invariance carries a falsifier.`
-      }
+        lens: `fidelity:${p.id}`, read: fidelityRead(p),
+        run: () => kit.critic(specFidelityCritique(p, plan, knownGaps), `fidelity:${p.id}`),
+        fallback: `The scope-fidelity critic for partition "${p.id}" returned no result, so its anchors are unaudited. Confirm each of ${p.anchors.join(", ")} (scope goal G<n> or closed question OQ<n> in ${SPECS}/${slug}-scope.md) lands in ${specPath} as a goal delivered by a phase, or as an open question, neither widened nor narrowed, and that each of ${quoted(p.phases) || "its phases"} agrees with the subsections its Design line names.`
+      }))
     ];
-    log(`spec: ${lenses.length} lens critic(s): ${lenses.map((l) => l.lens).join(", ")}.`);
+    for (const l of lenses) reads.set(l.lens, l.read);
+    log(`spec: ${lenses.length} parallel lens critic(s): ${lenses.map((l) => l.lens).join(", ")}.`);
     const verdicts = await parallel(lenses.map((l) => l.run));
-    const critique = mergeCritiques(lenses.map((l, i) => ({ lens: l.lens, critique: verdicts[i], fallback: l.fallback })));
     log(`spec lens critics: ${lensSummary(lenses, verdicts)}.`);
+    const panel = lenses.map((l, i) => ({ lens: l.lens, critique: verdicts[i], fallback: l.fallback }));
+
+    // Plain-JS checks over the indexes the phases and template lenses returned. Each finding is a
+    // "[check] " issue beside the lens issues. A dead lens returns no index, so its blocks are
+    // covered by its fallback issue instead.
+    // Neither index is in the critic schema's required list, so a missing one is treated like a
+    // dead lens for the checks that need it.
+    const designHeadings = verdicts[lenses.findIndex((l) => l.lens === "template")]?.design_headings ?? null;
+    const phaseIndex = lenses.flatMap((l, i) => (l.lens.startsWith("phases:") && verdicts[i]) ? (verdicts[i].phases || []) : []);
+    const plannedTitles = plan.phases.map((ph) => ph.title);
+    const phaseNumber = (t) => { const m = /^Phase (\d+):/.exec(t); return m ? Number(m[1]) : null; };
+    const checks = [];
+    if (!designHeadings) log(`spec: the template critic returned no design_headings, so the Design-heading check is skipped this round.`);
+    for (const e of phaseIndex) {
+      if (!ROUTABLE.includes(e.agent)) checks.push(`[check] phase "${e.title}": its Agent routing line reads "${e.agent}", not one of ${ROUTABLE.join(", ")}.`);
+      if (designHeadings) {
+        for (const h of e.design) {
+          if (h === "None") continue;
+          if (!designHeadings.includes(h)) checks.push(`[check] phase "${e.title}": its Design line names "${h}", which is not a ### heading under ## Proposed Design (the template critic read ${quoted(designHeadings) || "none"}).`);
+        }
+      }
+      const own = phaseNumber(e.title);
+      for (const d of e.depends_on) {
+        if (d === "None") continue;
+        if (!plannedTitles.includes(d)) { checks.push(`[check] phase "${e.title}": its Depends on line names "${d}", which is not a planned phase title.`); continue; }
+        const dn = phaseNumber(d);
+        if (own == null || dn == null || dn >= own) checks.push(`[check] phase "${e.title}": its Depends on line names "${d}", which is not an earlier phase.`);
+      }
+      if (e.criteria_count > 6) checks.push(`[check] phase "${e.title}": ${e.criteria_count} acceptance criteria, over the cap of six. Collapse into the named tests that already assert them, or raise the split as an issue for the orchestrator's gate.`);
+      for (const run of e.test_runs) {
+        const hit = wholeSuiteHit(run);
+        if (hit) checks.push(`[check] phase "${e.title}": the criterion run \`${run}\` is the whole ${hit.name} suite (\`${hit.command}\`); the whole suite belongs to the validate stage.`);
+      }
+    }
+    const fileOwners = new Map(); // Scope IN path -> titles of the phases that name it
+    for (const e of phaseIndex) for (const path of new Set(e.scope_in_paths)) { const t = fileOwners.get(path) || []; if (!t.includes(e.title)) fileOwners.set(path, [...t, e.title]); }
+    const shared = [...fileOwners].filter(([, titles]) => titles.length > 1).map(([path, titles]) => ({ path, phases: titles }));
+    log(`spec checks: ${checks.length} finding(s) over ${phaseIndex.length} indexed phase(s); ${shared.length} file(s) in more than one phase's Scope IN.`);
+
+    // The coherence lens is a second hop: it reads only what the indexes and the plan name. At
+    // one partition there are no drafter seams, so it is skipped.
+    if (plan.partitions.length > 1) {
+      const read = coherenceRead(shared);
+      reads.set("coherence", read);
+      const verdict = await kit.critic(specCoherenceCritique(plan, shared), "coherence");
+      panel.push({
+        lens: "coherence", critique: verdict,
+        fallback: `The coherence critic returned no result, so this lens is unaudited. Check in ${specPath} that the phases named with each shared file (${shared.map((s) => `${s.path}: ${quoted(s.phases)}`).join("; ") || "none"}) make compatible, ordered changes to it, that every cross-cutting name, signature, layout, constant, and ordering is used identically wherever it appears, and that no ## Terminology term is used for a different concept in a phase.`
+      });
+      log(`spec coherence critic: ${verdict ? (verdict.clean ? "clean" : `${verdict.issues.length} issue(s)`) : "no result"}.`);
+    } else {
+      log(`spec: one partition, so the coherence critic is skipped; there are no drafter seams to check.`);
+    }
+    const critique = mergeCritiques(panel, checks);
 
     const loop = await reviseLoop(kit, result, critique);
-    if (loop.rounds === 2 && loop.critique && !loop.critique.clean) {
-      log(`spec revise loop stopped at its 2-round cap with ${loop.critique.issues.length} issue(s) still flagged.`);
+    if (loop.rounds === kit.reviseRounds && loop.critique && !loop.critique.clean) {
+      log(`spec revise loop stopped at its ${kit.reviseRounds}-round cap with ${loop.critique.issues.length} issue(s) still flagged.`);
     }
     return { ...loop, uncoveredAnchors };
   };
@@ -1672,9 +1943,10 @@ if (stage === "spec") {
 
   let outcome;
   if (feedback) {
-    // Structural refine: one reviser + one critic, unchanged. refine() reads no draft prompt on
-    // the feedback path, so none is passed.
-    outcome = await refine(architect, null, SPEC_CRITIQUE, SPEC_SCHEMA, "spec", "Spec", specPath, specTemplate, { ...specOpts, feedback });
+    // Structural refine: one reviser + one critic, unchanged. refine() uses neither the draft
+    // prompt nor the critique prompt on the feedback path (its feedback branch builds a scoped
+    // critic prompt of its own), so neither is passed.
+    outcome = await refine(architect, null, null, SPEC_SCHEMA, "spec", "Spec", specPath, specTemplate, { ...specOpts, feedback });
   } else {
     composition.mode = "partitioned";
     // The plan is drafter-class work on the spec's own tier: it fixes the phase outline and the
@@ -1732,7 +2004,10 @@ if (stage === "implement") {
   for (const [i, p] of phases.entries()) {
     const bad = !isObj(p)
       ? "is not an object"
-      : ["title", "agent", "scope", "acceptance"].filter(k => typeof p[k] !== "string" || !p[k].trim()).map(k => `has no ${k}`).join(", ");
+      : ["title", "agent", "scope", "acceptance"].filter(k => typeof p[k] !== "string" || !p[k].trim()).map(k => `has no ${k}`)
+          // `design` is optional: null or absent means a spec written before the **Design** line.
+          .concat(p.design == null || (Array.isArray(p.design) && p.design.every(h => typeof h === "string" && h.trim())) ? [] : ["has a design that is not an array of headings"])
+          .join(", ");
     if (bad) {
       log(`implement for ${slug}: phases[${i}] ${bad}. Nothing was run.`);
       return { stage: "implement", error: `phases[${i}] ${bad}` };
@@ -1769,7 +2044,25 @@ if (stage === "implement") {
   const exceptionsClause = c.mandatory_tests.length
     ? ` Exceptions apply. ${c.mandatory_tests.map(t => `When ${t.when}, the change still owes ${t.requires}${t.rule ? ` (defined in ${t.rule}; open it with the Read tool, it is path-scoped and does not load on its own)` : ""}.`).join(" ")}`
     : "";
-  for (const p of phases) { // reconstructed from <specs_dir>/<slug>.md's Agent routing lines; on re-entry, the not-yet-passed suffix
+  // Implement reads are scoped to the phase. The orchestrator sends only headings (args stay
+  // small and the on-disk spec stays the source of truth); the agent resolves them on disk. A
+  // null `design` means the spec predates the **Design** line and falls back to all of
+  // ## Proposed Design.
+  const designRead = (p) => p.design == null
+    ? "every subsection of ## Proposed Design"
+    : p.design.length
+      ? `the ## Proposed Design subsections titled ${quoted(p.design)}`
+      : "no ## Proposed Design subsection (the phase's **Design** line reads None)";
+  const specRead = (p, extra = []) =>
+    `Open ${SPECS}/${slug}.md only to read these sections: ### Core Principle under
+     ## Proposed Design; ${designRead(p)}; ${extra.map((s) => `${s}; `).join("")}and the phase
+     block titled "${p.title}" under ## Implementation Plan. Locate each by heading (for example
+     \`grep -n '^##' ${SPECS}/${slug}.md\`) and read it by line range up to the next heading of
+     the same or higher level. If a section you were sent to names another ## Proposed Design
+     subsection by heading, read that one too. Read nothing else in the spec. If a
+     heading you were sent to is not a "### " heading under ## Proposed Design, stop before any other work
+     and return that as your whole result, naming the missing heading and the phase.`;
+  for (const p of phases) { // reconstructed from <specs_dir>/<slug>.md's phase blocks; on re-entry, the not-yet-passed suffix
     // An agent is reviewed by its own lane's architect. An unlaned agent (a docs phase) is
     // reviewed by the workstream's architect. This replaces a two-way mapping that silently sent
     // every non-dev phase to one lane.
@@ -1785,8 +2078,8 @@ if (stage === "implement") {
     const impl = await agent(
       `AS. ${roleOf(p.agent)}
 
-       OBSERVE. Read ${SPECS}/${slug}.md. The work to implement is the phase titled
-       "${p.title}", with the scope below.
+       OBSERVE. The work to implement is the phase titled "${p.title}" of ${SPECS}/${slug}.md,
+       with the scope below. ${specRead(p)}
 
        CONSIDERING. Use the \`${c.rules_dir}/*.md\` whose globs intersect this phase's
        files-affected set, if that directory exists. Do not touch any file outside the phase's
@@ -1896,13 +2189,15 @@ if (stage === "implement") {
       `AS. ${roleOf(verifyArchitect)}
 
        OBSERVE. Review the "${p.title}" implementation just produced on the current branch.
+       ${specRead(p, ["## Invariance"])}
 
-       CONSIDERING. Use ${SPECS}/${slug}.md. ${openRules("the files this phase changed")}
+       CONSIDERING. Use the spec sections you read. ${openRules("the files this phase changed")}
        ${invariantsClause} The mechanical acceptance-criterion checks have already run
        elsewhere. Do not repeat them.
 
        ORDER.
-       1. Implementation -> design fit against the spec's intent.
+       1. Implementation -> design fit against the intent of the design subsections and phase
+          block you read.
        2. Design fit -> adherence to each load-bearing invariant.
        3. Adherence -> simplicity. Ask whether the change does only what the phase intends.
        3b. Simplicity -> test proportionality. For each test this phase landed, ask whether it
@@ -1972,12 +2267,15 @@ if (stage === "implement") {
     }
 
     // (d) Commit the verified phase. This is mechanical, so it runs on the commit tier
-    // (config.models.commit). The committer stages the whole tree except the specs directory,
-    // because this slug's artifacts are committed at ship and other workstreams' artifacts never
-    // are. It reports staged paths the phase scope does not name instead of dropping them, since
-    // an unstaged leftover would ride into the next phase's commit anyway. A failed commit
-    // (usually a pre-commit hook) halts the loop. The phase has still passed review, so re-entry
-    // does not resend it. The developer fixes and commits it by hand (command doc Step 6.3).
+    // (config.models.commit). The committer stages the whole tree except the specs directory.
+    // This slug's artifacts are committed on their own by the orchestrator (the spec commit at
+    // approval, revision commits after it; command doc Steps 4 and 4a), so a spec re-sync made
+    // during a phase must not ride in a phase commit; and other workstreams' artifacts are
+    // untracked until their own spec commit. It reports staged paths the phase scope does not
+    // name instead of dropping them, since an unstaged leftover would ride into the next phase's
+    // commit anyway. A failed commit (usually a pre-commit hook) halts the loop. The phase has
+    // still passed review, so re-entry does not resend it. The developer fixes and commits it by
+    // hand (command doc Step 6.3).
     const commit = await agent(
       `Commit the verified implementation of phase "${p.title}" of ${SPECS}/${slug}.md.
 
@@ -1987,8 +2285,9 @@ if (stage === "implement") {
           error and stop.
        3. List each staged path that the phase scope below does not name, either by file or by a
           directory that contains it. Return these as "unexpected". Commit them anyway.
-       4. Read \`git diff --cached\` and the phase's section of the spec. Read
-          \`git log -10 --format=%s\` for the repository's subject convention. Write the message:
+       4. Read \`git diff --cached\` and the phase block titled "${p.title}" in
+          ${SPECS}/${slug}.md (that block only). Read \`git log -10 --format=%s\` for the
+          repository's subject convention. Write the message:
           - Subject: 72 characters or fewer, imperative mood, in the repository's convention.
             Where the log shows none, use a conventional commit, \`<type>(<area>): <summary>\`,
             and pick the type from the change (feat, fix, refactor, test, docs, chore).

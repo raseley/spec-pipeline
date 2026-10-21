@@ -98,9 +98,9 @@ the number you actually observed. Do not state the number you expect.
 
 A goal is one short paragraph. It carries the outcome, the name of the check,
 and the observed number. It does not carry the full recipe: the exact command
-pipeline, the fixture wiring, the patched methods, or the assertion text. That
-recipe belongs in the spec's `#### Acceptance Criteria` for the phase that
-delivers the goal.
+pipeline, the fixture wiring, the patched methods, or the assertion text. The
+named check belongs in the spec's `#### Acceptance Criteria`; fixture wiring
+and assertion text belong in the test.
 
 Bad: a goal that defines a `sed` range, lists eight `grep -c` pipelines with
      their before-and-after counts, and specifies how a unit test builds its
@@ -244,7 +244,10 @@ zero, one, or many.
 
   • If a question this scope raised was answered before saving, keep its
     number. Keep its question sentence. Replace the closing clause with
-    `**Closed (YYYY-MM-DD)** — [the decision] — [who ruled, when a human did]`.
+    `**Closed (YYYY-MM-DD)** — Selected: [a label character-for-character from
+    this entry's Options, or: none of the listed options — <the answer as
+    given, or "deferred: <what decides it later>">] — [the rationale, or who
+    ruled]`.
     Leave the entry in the numbered list. A closed entry does not become a new
     section. A closed entry does not move. Do not add a seventh H2 to hold
     closed entries. Do not renumber. A closed entry keeps its **Options**
@@ -305,8 +308,8 @@ tree. Run each Part B check. Do not assert its result.
       lists), each naming the check that confirms it.
 - [ ] **Goals carry the check's name and observed number, not its recipe** —
       no goal contains a command pipeline, a `sed` range, fixture wiring,
-      patched methods, or assertion text. That material belongs in the spec's
-      `#### Acceptance Criteria`.
+      patched methods, or assertion text. The named check belongs in the
+      spec's `#### Acceptance Criteria`; the rest belongs in the test.
 - [ ] **Non-Goals collapse explicit dimensions** — each excluded item names its
       reason: out-of-scope, deferred, or conflicts with a named `CLAUDE.md`
       invariant, cited by section heading rather than restated.
@@ -327,8 +330,10 @@ tree. Run each Part B check. Do not assert its result.
 - [ ] **Open Questions is well-formed** — every numbered entry is in exactly one
       of the two entry shapes (still-open, carrying `**Context**` /
       `**Options**` / `**Recommended**` sub-bullets and naming what would close
-      it; or closed, carrying `**Closed (YYYY-MM-DD)**` and preserving its
-      `**Options**` verbatim), numbering is unbroken and unrenumbered, and no
+      it; or closed, carrying `**Closed (YYYY-MM-DD)**`, preserving its
+      `**Options**` verbatim, and carrying a `Selected:` that is one of those
+      labels or the `none of the listed options — ...` form), numbering is
+      unbroken and unrenumbered, and no
       seventh H2 was added to hold closed entries. When and only when the
       section has no entries at all, it is the single explicit sentence
       `No open questions — spec drafting may begin.` with no list and no

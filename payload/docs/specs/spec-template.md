@@ -13,25 +13,29 @@ This template structures the spec written at the end of the triage → scope →
 spec progression. The spec is the source of truth that drives implementation.
 
 The spec lands at `docs/specs/<slug>.md`. The implement stage does not read it
-as prose. From each phase it copies four fields into the implement prompts:
-the phase title, its `**Agent routing**:` line, its `#### Scope`, and its
-`#### Acceptance Criteria`. No other spec text reaches those prompts verbatim.
-Three readers receive different parts:
+as prose. From each phase it copies five fields into the implement prompts:
+the phase title, its `**Agent routing**:` line, its `**Design**:` line, its
+`#### Scope`, and its `#### Acceptance Criteria`. No other spec text reaches
+those prompts verbatim. Three readers receive different parts:
 
-  - The dev agent receives `#### Scope` inlined, plus an instruction to open
-    this file at its own phase heading. It treats `#### Scope` as the
-    boundary it must not work outside. It is not a summary.
+  - The dev agent receives `#### Scope` inlined as the boundary it must not
+    work outside, plus an instruction to open this file and read exactly
+    `### Core Principle`, the `## Proposed Design` subsections its phase's
+    `**Design**:` line names, and its own phase block. It is told to read
+    nothing else.
   - The criteria checker receives `#### Acceptance Criteria` alone. It is
     never told to open the spec. It cannot see the phase around the criteria.
     Its verdict halts every later phase in the workstream.
-  - The architect reviewer receives the whole file, but only after the
-    criteria check has passed. It cannot rescue a phase whose criteria block
-    failed.
+  - The architect reviewer, after the criteria check has passed, opens this
+    file and reads exactly `### Core Principle`, the same `**Design**:`
+    subsections, `## Invariance`, and the phase block. It cannot rescue a
+    phase whose criteria block failed.
 
-Everything above `## Implementation Plan` reaches the implement stage only
-when an agent chooses to open the file. Write each phase block for the agents
-that receive it copied. Write the sections above it for the reader who opens
-the file.
+Everything else above `## Implementation Plan` reaches the implement stage
+only when an agent chooses to open it. Write each phase block for the agents
+that receive it copied. Write each `## Proposed Design` subsection for the dev
+agent and reviewer sent to it by heading: its heading is the address a
+`**Design**:` line resolves, so keep headings unique and stable.
 
 The spec ends at `## Open Questions`.
 
@@ -106,9 +110,10 @@ paths inside a worked example. Do not cite a test module that does not exist.
 A goal is one short paragraph. When its observable condition is a grep, a
 count, or a list of files, name the check in a few words and state the number
 observed today. Do not put the full recipe in a goal: the exact command
-pipeline, the fixture wiring, the patched methods, or the assertion text. That
-recipe belongs in `#### Acceptance Criteria` of the phase that delivers the
-goal, which is the only spec text the criteria checker reads.
+pipeline, the fixture wiring, the patched methods, or the assertion text. The
+named check belongs in `#### Acceptance Criteria` of the phase that delivers
+the goal, which is the only spec text the criteria checker reads; fixture
+wiring and assertion text belong in the test itself.
 
 Goals must be expressible as observable conditions on a concrete surface of
 this repository (one of the kinds listed in the `## Executive Summary`
@@ -267,6 +272,12 @@ This section must be specific enough that an architect-style agent can
 evaluate tradeoffs. It must also be specific enough that a dev-style agent can
 implement without ambiguity. Order information by dependency: principles
 before mechanisms, mechanisms before details.
+
+Each subsection heading is an address: phase `**Design**:` lines name it
+character for character. Keep headings unique, and change one only together
+with every `**Design**:` line that names it. A phase's Tasks and Scope IN must
+agree with the subsections its `**Design**:` line names; the fidelity critic
+checks this.
 
 For each design element, provide:
   - what changes (the mechanism)
@@ -481,17 +492,31 @@ qualification into the phase's Scope. A phase that genuinely needs two agents
 is two phases. There is no `manual` routing: nothing in `.claude/agents/`
 answers to it and the stage cannot run it.
 
+The `**Design**:` line is machine-read too. It names the `## Proposed Design`
+subsections this phase implements, each heading character for character as it
+appears under `## Proposed Design` (without the `### `), separated by `; `, or
+exactly `None` for a phase no design subsection governs (a deletion, a
+docs-only phase). It is one physical line; do not wrap it. The dev agent and
+the architect reviewer are sent to exactly these subsections and read no other
+design text. A heading that does not exist sends them nowhere. The phases
+critic verifies each heading against the file, so a heading the synthesizer
+merged or renamed is an issue, not a silent miss. A phase whose Tasks say "as
+the design names them" above a `None` line has hidden its design from its
+implementer.
+
 Architect agents own design decisions. Dev agents own implementation. Docs
 agents own authored documentation. Do not introduce phase numbers into
 identifiers, filenames, comments, or docstrings. Phase numbers belong to the
-spec narrative, not the source.
+spec narrative, not the source. A phase split or renumbering is never performed
+in a revise round; it goes to the developer.
 
 Write each phase for its narrowest reader. The dev agent is told to open this
-file at its own phase heading, so it can see the phase around its Scope. The
-criteria checker cannot. It receives `#### Acceptance Criteria` as
-free-standing text and nothing else. The criteria block in particular must
-therefore stand on its own. See the rules under `#### Acceptance Criteria`
-below.
+file and read `### Core Principle`, the subsections its `**Design**:` line
+names, and its own phase block, so it can see the phase around its Scope and
+the design the phase implements. The criteria checker cannot. It receives
+`#### Acceptance Criteria` as free-standing text and nothing else. The criteria
+block in particular must therefore stand on its own. See the rules under
+`#### Acceptance Criteria` below.
 -->
 
 ### Phase 1: [Short Imperative Name]
@@ -502,6 +527,8 @@ below.
 **Agent routing**: [exactly one of: api-architect | api-dev | web-architect | web-dev | docs-writer]
 
 **Depends on**: [Prior phase | None]
+
+**Design**: [the `## Proposed Design` subsection headings this phase implements, character for character, separated by `; ` | None]
 
 #### Scope
 
@@ -625,15 +652,16 @@ honestly, the phase has a test surface you have not found.
 
 <!--
 TARGET REGION for this phase — concrete, verifiable conditions. Each criterion
-should be checkable by reading a file, calling a route, parsing a response
-field, or running a TARGETED test selection.
+is checkable by running a TARGETED test selection, calling a route, parsing a
+response field, or reading a file the run produced.
 
 EVERY CRITERION MUST BE ADJUDICABLE FROM ITS OWN TEXT PLUS THE WORKING TREE.
 This block is the only spec text the criteria checker receives, and its verdict
 halts every later phase. So: no "Phase N" — it cannot see the other phases; no
-`## Section` reference — it was not given the file; no "the new field" or "the
-model above" — name the path and the symbol. A criterion it cannot honestly
-pass or fail is one it must guess at, and a wrong guess blocks the workstream.
+reference to any spec heading at any level — it was not given the file; no "the
+new field" or "the model above" — name the path and the symbol. A criterion it
+cannot honestly pass or fail is one it must guess at, and a wrong guess blocks
+the workstream.
 -->
 <!-- ADOPT: Name this repository's narrow tier directories (from `lanes[].narrow_dirs`, or say none is configured) and its whole-suite invocations (every `suites[].command` with its cwd, and every `whole_suite_patterns` entry). Replace the example below with one from this repository, then delete this marker. -->
 <!--
@@ -641,6 +669,27 @@ SCOPE EVERY TEST RUN. A criterion names specific test modules or node ids, or
 at most one narrow tier directory (`api/tests/contract/`) where the phase's
 surface genuinely is that whole tier. Never write `pytest api/tests/`, a bare
 `pytest`, or `npx vitest run` with no path into a phase's criteria.
+-->
+<!--
+EVERY CRITERION IS A BEHAVIOUR, AND THERE ARE AT MOST SIX. A criterion passes
+or fails on what the code does: a named test selection that exits 0, a command
+on a program path whose output is stated (a route response, a CLI's stdout, a
+file the run writes, a record that reloads), or a benchmark threshold.
+Introspection of definitions is a shape check however it is run: reflection
+over a type's fields or flags, a `grep -c` of function or class definitions, a
+symbol's presence or line count, a constant list compared literal-for-literal,
+a type's field order, a file hash. Each is an issue. Name the test that already
+asserts it instead.
+The one allowed shape check is an absence grep that must print nothing, for
+one of: a symbol this phase's `**IN**` retires, an `**OUT**` exclusion, a
+scope `## Non-Goals` entry, or a `CLAUDE.md` constraint cited by section
+heading. The criterion says which. One command or one test selection per
+bullet. Several assertions on that one command's output are one criterion.
+At most six bullets per phase. No reference to any spec heading at any level,
+and no referent the bullet does not name by path or symbol. A phase over the
+cap is first collapsed into the named tests that already assert its checks. A
+genuine split is a plan change: the critic raises it as an issue that reaches
+the orchestrator's gate, and no revise round performs it.
 -->
 <!--
 The whole-suite regression run belongs to the pipeline's validate stage, which
@@ -655,8 +704,11 @@ the global claim.
 CONSTRAIN *HOW* A FILE CHANGED BY CONTENT, NEVER BY `git diff` AGAINST `HEAD`.
 A branch accumulates uncommitted work across phases, so "the diff on this file
 is comment lines only" judges every phase since the last commit rather than the
-phase under test. Assert content instead: a `grep` for text that must be
-present or absent, a named test that must pass, a parse check.
+phase under test. Assert content instead: a named test that must pass, a parse
+check, or an absence grep that must print nothing for one of the four sources
+the EVERY CRITERION paragraph allows (an `**IN**` retirement, an `**OUT**`
+exclusion, a scope `## Non-Goals` entry, or a `CLAUDE.md` constraint cited by
+section heading).
 
 Two `git diff` shapes remain sound: EMPTY `git diff <path>` for a path no phase
 in the workstream may ever touch, and `git diff --name-only <commit>..HEAD`
@@ -670,7 +722,8 @@ naming its baseline commit explicitly.
       "`pytest api/tests/unit/test_refunds.py -q` passes;
        `pytest api/tests/contract/test_money_types.py -q` passes"]
 - [ ] [Observable condition — e.g., "`grep -nE 'float\(|Decimal\(' api/routes/refunds.py`
-      returns no hit"]
+      prints nothing (absence grep for the `CLAUDE.md` Money as Integer Cents
+      constraint)"]
 
 ### Phase 2: [Next Phase Name]
 
@@ -746,11 +799,17 @@ stay valid.
 
      2. **Closed (YYYY-MM-DD)** — [the decision as one direct sentence]
         - **Context** / **Options**: [preserved verbatim from when it was open]
-        - **Selected**: [the chosen option label] — [one clause on why]
+        - **Selected**: [a label character-for-character from Options, or:
+          none of the listed options — <the answer as given, or "deferred:
+          <what decides it later>">] — [one clause on why]
 
   3. NONE — exactly this sentence and nothing else:
 
      No open questions — implementation may begin.
+
+     That sentence is for a spec that surfaced no question. An artifact whose
+     entries are all closed keeps the numbered list and does not add the
+     sentence; never renumber or move a closed entry.
 -->
 
 No open questions — implementation may begin.
@@ -810,9 +869,18 @@ silently here.
 
 - [ ] **Acceptance criteria stand alone**: Read each `#### Acceptance Criteria`
       block with the rest of the spec covered. Is every criterion adjudicable
-      from that text plus the tree — no `Phase N`, no `## Section` reference,
-      no "the new field" without its path? (The criteria checker receives this
+      from that text plus the tree — no `Phase N`, no reference to any spec
+      heading at any level, no "the new field" without its path? (The criteria
+      checker receives this
       block and nothing else, and its verdict halts every later phase)
+- [ ] **Acceptance criteria are behavioural and capped**: Does every criterion
+      pass or fail on what the code does (a named test selection, a stated
+      output on a program path, a benchmark threshold), with any grep that
+      remains an absence grep naming which of the four sources it enforces: an
+      `**IN**` retirement, an `**OUT**` exclusion, a scope `## Non-Goals`
+      entry, or a `CLAUDE.md` constraint cited by section heading? Does every
+      bullet run one command or one test selection, and does no phase carry
+      more than six bullets?
 - [ ] **Scope enumerates paths**: Does each `#### Scope` IN and OUT name
       repo-rooted paths rather than referring to them? (It is inlined into the
       dev agent's prompt as its off-limits boundary)
@@ -840,6 +908,14 @@ silently here.
       parenthetical, no trailing clause, no second agent, no `manual`? (The
       line is machine-read to select the subagent; anything else is an
       unresolvable parse)
+- [ ] **Design lines resolve**: Does every `**Design**:` line name only
+      headings that exist under `## Proposed Design`, character for character,
+      separated by `; ` — or read exactly `None`? (The line is machine-read to
+      send the dev agent and the architect reviewer to those subsections; a
+      heading that does not exist sends them nowhere)
+- [ ] **Design headings are unique**: Is every `### ` heading under
+      `## Proposed Design` unique, so that a `**Design**:` line resolves to
+      one subsection?
 - [ ] **Status line present and set to Draft**: The metadata block under the
       title contains `**Status**: Draft`. The status advances to `Final` when
       the spec is approved for implementation.

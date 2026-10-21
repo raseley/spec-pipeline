@@ -48,19 +48,31 @@ When reading implement results:
 
 When reading scope and spec results, the **composition** line says how many partitions the plan chose and
 why, how many agents ran, and which anchors (if any) were unassigned or uncovered before the synthesizer
-landed them. A small change gets one partition; a large source gets up to six parallel drafters.
+landed them. A small change gets one partition; a large source gets up to six parallel drafters. Spec results
+also name the lenses that ran and whether the `coherence` lens was skipped (it is, at one partition). Every
+critique issue carries the lens that raised it (`[phases:<partition>]`, `[template]`, `[fidelity:<partition>]`,
+`[coherence]`, or `[check]` for a plain-JS check), so you can see which reading flagged it. The spec gets one
+revise round; whatever is still flagged after it stops at the gate for you to judge.
 
 ## Refining: inline vs structural
 
 **Inline** (the default): selecting an option, fixing wording or terminology, a small factual correction,
 adding or dropping a detail that does not cascade. The orchestrator edits the artifact directly and makes
-**no workflow call**: a two-line decision is a 30-second edit, not an agent fan-out.
+**no workflow call**: a two-line decision is a 30-second edit, not an agent fan-out. Once the spec is
+approved and the artifacts are committed, each such edit is also one `docs(specs): revise <slug>: ...`
+commit.
+
+You can answer an open question **off the list**. The orchestrator records your answer as given, in the
+template's off-list form (`Selected: none of the listed options — <your answer>`, or `deferred: <what decides
+it later>`), and never maps it onto the nearest option. An off-list answer that introduces a mechanism the
+artifact does not describe is structural.
 
 **Structural** (a workflow round): your note changes the lane or change type; adds or removes goals or
 non-goals; alters the design, the Invariance section, or the phase decomposition; answers an entry raised
-by an unfillable `## ORDER` or `## VALIDATE`; or answers a blocking `B` entry. The same stage re-runs with
+by an unfillable `## VALIDATE`; or answers a blocking `B` entry. The same stage re-runs with
 your notes as `feedback`. One reviser applies them in place and one critic checks only your points. Spec
-revisions re-read the scope first, because the scope binds the spec's Goals and Non-Goals.
+revisions re-read the scope first, because the scope binds the spec's Goals and Non-Goals. A revise round
+never splits, merges, or renumbers a phase; a phase that needs a split comes back to you as an open question.
 
 When unsure, the orchestrator chooses inline. An inline refine you initiate does not resume the chain; say
 `advance` when ready.
@@ -83,11 +95,21 @@ If the top tier is unavailable to you, set `models.spec` and `models.escalation`
 | `<specs_dir>/<slug>-scope.md` | scope | executive summary, goals, non-goals, files affected, dependencies, open questions |
 | `<specs_dir>/<slug>.md` | spec | design, invariance, phased plan with routing, scope, tests, and acceptance criteria |
 
-- They are **untracked** while you work. Read them and edit them freely; the next stage reads whatever is on disk.
-- Entering implement flips the spec to `**Status**: Final` (that is the approval).
-- **Ship** commits them on their own after the per-phase implementation commits (only this slug's three),
-  links the spec by that commit's SHA, then removes them from the branch tip with `chore(specs): remove <slug> pipeline artifacts`. With
+- They are **untracked** through triage, scope, and spec. Read them and edit them freely; the next stage
+  reads whatever is on disk.
+- **Approval commits them.** When the spec is approved (the gate clears on it, or you say `advance`), the
+  orchestrator creates the `<prefix>/<slug>` branch, flips the spec to `**Status**: Final`, and commits only
+  this slug's three files as `docs(specs): add <slug> pipeline artifacts`, before implement starts. From then
+  on they live on that branch, and every later edit gets its own `docs(specs): revise <slug>: ...` commit,
+  never an amend. A revised spec stays `Final`.
+- **Ship** commits any leftovers, links the spec at the pre-removal branch tip's SHA, then removes the
+  artifacts from the branch tip with `chore(specs): remove <slug> pipeline artifacts`. With
   `remove_artifacts_after_pr: false` they stay and merge with the PR.
+- **The implement agents read a bounded slice of the spec.** Each phase's `**Design**:` line names the
+  `## Proposed Design` subsections it implements (or `None`). The dev agent and the architect reviewer read
+  only the Core Principle, those subsections, and the phase block (the reviewer also `## Invariance`). If you
+  hand-edit a subsection heading, update every `**Design**:` line that names it; the orchestrator checks each
+  heading before implement and stops on one that does not resolve.
 - Never `git add -A` over the specs directory and never glob-delete in it: it holds the templates and other
   workstreams' drafts.
 
@@ -96,7 +118,9 @@ If the top tier is unavailable to you, set `models.spec` and `models.escalation`
 Each slug has its own artifacts, so you can triage, scope, and spec several workstreams in the same
 checkout. Implement is different: it needs the slug's branch checked out, and there is one working tree. Run
 one workstream through implement, validate, and ship at a time. Untracked drafts of other slugs ride along
-harmlessly across checkouts and are excluded from every ship commit.
+harmlessly across checkouts and are excluded from every commit. A slug whose spec is already approved has
+its artifacts only on its own branch: switch to it (or just say `advance`; the orchestrator finds the branch
+or the PR from the slug) to see them.
 
 ## Rework after ship
 

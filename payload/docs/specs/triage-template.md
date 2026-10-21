@@ -10,13 +10,11 @@
 
 <!-- ADOPT: This template assumes the default specs directory `docs/specs/` and the default steering file `CLAUDE.md`; if `specs_dir` or `steering.file` in .claude/spec-pipeline.json differs, replace every occurrence of either in this template. Then delete this marker. -->
 <!--
-Triage template. The six section names come from the Geometry of Intent paper.
-This template follows the layout of `scope-template.md`: an H1, frontmatter, and HTML comments. The artifact is saved at
-`docs/specs/<slug>-triage.md`. The scope artifact at `docs/specs/<slug>-scope.md` reads the triage body verbatim as context.
-Every line of the triage body becomes context for the scoping work.
-The artifact has exactly six H2 sections: `## AS`, `## OBSERVE`, `## CONSIDERING`, `## ORDER`, `## VALIDATE`, `## OUTPUT`.
-It stops at the end of `## OUTPUT`. The `## Composition-Time Self-Check` section at the bottom of this template is reference
-for the writer only. Do not copy the self-check into the artifact. The scope stage would read it as part of the intent.
+Triage template. The artifact is saved at `docs/specs/<slug>-triage.md`. The scope stage reads its body verbatim as
+context, so no HTML comment and nothing below `## OUTPUT` may survive in it. The artifact has exactly five H2 sections:
+`## AS`, `## OBSERVE`, `## CONSIDERING`, `## VALIDATE`, `## OUTPUT`. It stops at the end of `## OUTPUT`. The
+`## Composition-Time Self-Check` at the bottom of this template is reference for the writer only; do not copy it into the
+artifact.
 
 What each section must contain:
 
@@ -25,7 +23,6 @@ What each section must contain:
 | `## AS` | One sentence naming one agent role and the surface it reasons over. The lane must be readable from the role. |
 | `## OBSERVE` | Two mandatory parts. Every surviving claim carries `path:line`. The ref and commit are named. |
 | `## CONSIDERING` | Four fixed bullets with exact paths. Every invariant passes the derivation test. Every exclusion has a falsifiable check. |
-| `## ORDER` | The six mandatory spine links, with fixed names and free derivations. Extra links are allowed. |
 | `## VALIDATE` | One independent reframing, the claim that survives it, and a concrete falsifier. "Internally coherent" and "actionable" are not accepted. |
 | `## OUTPUT` | The literal shapes given in that section. They are mandatory. |
 
@@ -37,7 +34,7 @@ is a legitimate triage outcome, not a failure to try harder. Examples: "this is 
 
 | Status | Lane | Branch | `## OUTPUT` form | Unfillable forms allowed |
 |---|---|---|---|---|
-| Draft | a configured lane name | `<prefix>/<slug>`, with `<prefix>` one of the configured branch prefixes and `<slug>` equal to **Slug** | Form 2 with at least one **Open** entry and no B entry | Non-blocking forms only (`## ORDER` as a whole section, or `## VALIDATE`) |
+| Draft | a configured lane name | `<prefix>/<slug>`, with `<prefix>` one of the configured branch prefixes and `<slug>` equal to **Slug** | Form 2 with at least one **Open** entry and no B entry | `## VALIDATE`'s non-blocking form only |
 | Decided | a configured lane name | `<prefix>/<slug>`, with `<prefix>` one of the configured branch prefixes and `<slug>` equal to **Slug** | Form 1, or Form 2 with every entry **Decided (YYYY-MM-DD)** | None |
 | Blocked | `unresolved` | `unresolved - triage blocked on routing` | Form 3 (at least one B entry) | At least one blocking form, in `## AS`, `## OBSERVE`, or `## CONSIDERING` |
 
@@ -57,7 +54,7 @@ Unfillable forms. Any section may be written in one of two literal forms instead
 Blocking form, for `## AS`, `## OBSERVE`, and `## CONSIDERING` only:
   **<SECTION> is unfillable.** <One sentence naming precisely what cannot be decided.> <One sentence naming the evidence or
   human decision that would decide it.> Handed back as ## OUTPUT entry B<n>.
-Non-blocking form, for `## ORDER` (the whole section) and `## VALIDATE` only:
+Non-blocking form, for `## VALIDATE` only:
   **<SECTION> is unfillable.** <One sentence naming precisely what cannot be decided.> <One sentence naming the evidence or
   human decision that would decide it.> Raised as ## OUTPUT entry <n>, whose **Closes on** carries that same decision.
 The blocking form forces Status: Blocked, Lane: unresolved, and the unresolved **Branch** string. It also requires a matching
@@ -65,8 +62,7 @@ B<n> entry in `## OUTPUT`.
 The non-blocking form does not block routing. Lane and **Branch** stay real. It does force Status: Draft. It raises a Form 2
 **Open** entry whose **Closes on** repeats the "what would decide it" sentence word for word. Form 1 and Status: Decided are
 therefore unavailable.
-Exactly one of the two forms applies per case. There is no third form. The one exception is a single underivable `## ORDER`
-link, which has its own in-place line (see that section).
+Exactly one of the two forms applies per case. There is no third form.
 `## OUTPUT` is never unfillable. Form 1 is its zero case.
 -->
 <!-- ADOPT: List the kinds of concrete surface this repository exposes (routes, fields, records, payload keys, migrations, test ids, components, commands). Replace the example below with one from this repository, then delete this marker. -->
@@ -96,7 +92,6 @@ The role comes from the roster: every agent listed in `.claude/spec-pipeline.jso
 agents) means `Lane: <that lane's name>`.
 An unlaned agent and `manual` name no lane. If the only honest role is one of them, routing is a question for a human. In that
 case, write this section's blocking unfillable form and a matching B entry instead of naming the role.
-If routing needs a human decision first, write the header's blocking unfillable form rather than inventing a role.
 -->
 <!-- ADOPT: Give one good AS sentence naming a lane architect from this repository and two real paths it reasons over. Replace the example below with one from this repository, then delete this marker. -->
 <!--
@@ -124,7 +119,6 @@ Name every citation from the source that does not resolve on the tree, with what
 If nothing was falsified and every citation resolved, end Part B with exactly this sentence, so a reader can tell "checked,
 all held" from "did not check":
   Every claim in **Claimed** survived verification and every cited path resolves.
-If this section could appear unedited in a different project's repo, it is not specific enough.
 Or write the header's blocking unfillable form ("the premise is false, close the issue").
 -->
 
@@ -140,11 +134,10 @@ Write exactly four bold-label bullets, in the order below. This section carries 
 The exclusions go in **While excluding**, as participial sub-clauses that name the obvious answer to steer away from.
 Every path is real and exact. Do not use abstractions like "the persistence layer" or "the service module". Give line ranges
 where the change is line-local.
-Invariants are derived, not selected. There is deliberately no list to pick from. Cite an invariant only where you can name
-two things. The first is the file or surface in **Target region** that the change must touch, with the edit that region
-implies. The second is what the violation looks like at runtime. If either is missing, delete the entry.
-Never restate the invariant's text. Point at `CLAUDE.md` by section heading and stop. A copy here drifts from the original,
-as this template's own copy once did.
+Invariants are derived, not selected. **Invariants in force** cites `CLAUDE.md` by section heading only, never its text.
+Each entry names the **Target region** surface the change must touch, the edit that region implies, and the runtime failure
+a violation produces; an entry that cannot name all three is deleted. Zero invariants is a legal and common outcome; write
+the exact sentence `No `CLAUDE.md` invariant is placed at risk by this change.` rather than an empty list.
   - **<invariant name>** (`CLAUDE.md` -> *<section heading>*) - violated by <the specific file or surface in **Target region**
     the change must touch, and the edit that region implies>; at runtime that looks like <the concrete observable failure>.
 -->
@@ -156,21 +149,13 @@ Good:
     that looks like a refund of exactly the remaining captured amount being rejected, or one cent over it being accepted.
 -->
 <!--
-The first slot names a region, not a line. Triage goes no finer than the files and behaviour the work touches (## ORDER link
-4), and no proposed change with line numbers exists yet.
-The runtime-symptom slot is required because an invariant picked from a list cannot name a concrete observable failure.
-Zero invariants is a legal and common outcome. Write the explicit sentence, not an empty list:
-  No `CLAUDE.md` invariant is placed at risk by this change.
-Also prohibited: any paraphrase of `CLAUDE.md` prose; any invariant selected because it is on a list.
 Each **While excluding** entry is exactly:
   - while excluding **<the adjacent thing the work might otherwise reach for>** - <out-of-scope | deferred | conflicts with
     `CLAUDE.md` -> *<section heading>*>; falsifiable by <the concrete check a reader runs>.
 "Falsifiable by" names an actual operation: a grep, a diff-absence claim ("`<path>` is absent from the diff"), a file-tree
 walk, or a named assertion. Never "review confirms".
-**While excluding** is what the work must not do. **Adjacent systems** is what the work must not break.
-The same path may appear in both where it genuinely carries both claims. The common case is a neighbouring surface the work
-must neither modify nor perturb. What is prohibited is a duplicated claim, not a shared path.
-Every exclusion names a falsifiable check. Every adjacency names what must keep holding.
+**While excluding** is what the work must not do; **Adjacent systems** is what it must not break. A path may appear in both;
+a duplicated claim may not. Every exclusion names a falsifiable check. Every adjacency names what must keep holding.
 Or write the header's blocking unfillable form in place of all four bullets ("this is two workstreams").
 -->
 
@@ -179,33 +164,6 @@ Or write the header's blocking unfillable form in place of all four bullets ("th
   change.]
 - **While excluding**: [one `while excluding ...` entry per exclusion, each carrying its falsifiable check]
 - **Adjacent systems**: [what the work must not perturb; awareness only, not exclusions]
-
-## ORDER
-
-<!--
-This section records triage's own derivation chain: the dependency structure of the reasoning that produced this artifact.
-It is not a plan for the scope stage. The scope stage has its own ordering in `.claude/workflows/spec-pipeline.js`. A second
-ordering of scoping's own steps here would be drift. The hand-off to scoping lives in `## OUTPUT`. A delivery-side obligation
-stated there is not a second ordering.
-The six spine links below are mandatory. Their names are fixed. Each takes one line. Six is a minimum, not a cap.
-Additional numbered links are permitted and encouraged wherever triage's reasoning actually carried a further dependency the
-spine does not name. Examples: a falsified `## OBSERVE` claim forcing a lane reversal, a `CLAUDE.md` invariant forcing the
-target region, one decision constraining another.
-Each additional link takes the same `N. <X> -> <Y>: <derivation>` form. Place it where the dependency actually sits.
-Renumber so the sequence reads in dependency order.
-Prohibited: any step the scope stage should take; any decision record (decisions live in `## OUTPUT` alone).
-A single spine link that could not be derived is written in place as `N. <link name> - not derived: <why>.` That is the only
-unfillable form for a single link. It raises no `## OUTPUT` entry. It does not change `Status`, because a missing link is a gap
-in the chain, not the absence of a chain.
-If the chain as a whole could not be derived, use the header's non-blocking unfillable form for the whole section instead.
--->
-
-1. raw idea -> verified facts: [what `## OBSERVE`'s verification settled that the raw idea left open]
-2. verified facts -> lane: [the verified fact that forces the lane named in `## AS`]
-3. lane -> change type: [why the **Branch** prefix follows; new capability vs correcting existing behavior]
-4. change type -> target region: [why the target region in `## CONSIDERING` follows]
-5. target region -> exclusions: [why the exclusions in `## CONSIDERING` follow]
-6. exclusions -> residual decisions: [what was left undecided once the exclusions were drawn, and why]
 
 ## VALIDATE
 
@@ -225,10 +183,9 @@ refunds), not a live over-refund defect. It is falsified if `POST /api/v1/orders
 refund whose `amount_cents` exceeds the order's captured total.
 -->
 <!--
-Prohibited: anti-goals or exclusions of any kind; a list; more than one reframing; a reframing that restates `## AS`'s frame.
-Or write the header's non-blocking unfillable form. Using it raises a Form 2 **Open** entry. It also forces Status: Draft.
-A triage that cannot say what would count as a good answer has not finished forming its intent. It must never sit alongside
-"No open questions - scoping may begin."
+Prohibited: anti-goals, a list, more than one reframing, a reframing that restates `## AS`. Or write the header's
+non-blocking unfillable form, which raises a Form 2 **Open** entry and forces Status: Draft; such a triage never sits
+alongside "No open questions - scoping may begin."
 -->
 
 Reframe as "[the independent frame, as a question or stance]" - under that reframing this must still read as [the claim that
@@ -238,20 +195,10 @@ break it].
 ## OUTPUT
 
 <!--
-The literal shapes in this section are mandatory.
-`## OUTPUT` carries three kinds of content and nothing else:
-  1. the hand-off: recipient, path, and branch
-  2. the recipient's obligations against the decisions delivered
-  3. the residual-decision record
-The hand-off sentence comes first and the record follows it. The obligations appear in two places: the hand-off's closing
-clause, and each Decided entry's **Obliges scoping to** sub-bullet. Stating what the recipient must do with what it receives
-is not a second ordering of scoping's own steps.
-The hand-off is always present, as exactly one of the two literal sentences below.
-The recipient named in the routed hand-off is the architect of the lane named on **Lane**, as `.claude/spec-pipeline.json`
-configures it.
-The record is exactly one of three combinations: Form 1 alone, Form 2 alone, or Form 3 optionally followed by a Form 2 list.
-Form 1 is never combined with anything. Form 3 followed by a Form 2 list is the normal shape of a blocked triage that also
-raised ordinary residual decisions. It is well-formed.
+The literal shapes in this section are mandatory. `## OUTPUT` holds the hand-off sentence first (exactly one of the two
+literals below), then the decision record, and nothing else. The recipient named in the routed hand-off is the architect of
+the lane named on **Lane**, as `.claude/spec-pipeline.json` configures it. The record is exactly one of: Form 1 alone,
+Form 2 alone, or Form 3 optionally followed by a Form 2 list.
 Form 1, for no residual decisions: the exact sentence `No open questions - scoping may begin.` alone. Add no list and no
 surrounding commentary. An empty numbered list is not a substitute. Status is Decided. Form 1 is unavailable if any section
 carries an unfillable form.
@@ -268,14 +215,15 @@ Form 2 rules:
   - When an entry closes, **Options**, their descriptions, and **Recommended** are kept verbatim. Closing a question is a diff
     that flips **Open** to **Decided (date)**, deletes **Closes on**, and adds **Selected**, **Because**, and **Obliges
     scoping to**. The result is a selection against enumerated choices, reviewable as a diff rather than an essay.
-  - **Selected** must match one of that entry's own Options labels character-for-character.
-  - A **Selected** that differs from **Recommended** is legal. It is the record of a human override.
+  - **Selected** is one of that entry's own Options labels character-for-character, or the off-list form
+    `none of the listed options — <the developer's answer in one or two sentences, or "deferred: <what decides it later>">`.
+    A **Selected** that differs from **Recommended**, or that is off-list, is legal; it is the record of a human override.
+    Options and Recommended stay verbatim either way.
   - **Obliges scoping to** is omitted only when the decision genuinely obliges nothing.
-  - An entry raised by a non-blocking unfillable `## ORDER` or `## VALIDATE` repeats that section's "what would decide it"
-    sentence, word for word, as its **Closes on**.
+  - An entry raised by a non-blocking unfillable `## VALIDATE` repeats that section's "what would decide it" sentence, word
+    for word, as its **Closes on**.
   - Entry numbering is stable for the life of the artifact. Never renumber to compact the list.
-  - No decision is ever recorded in `## ORDER`, `## CONSIDERING`, or `## VALIDATE`. `## OUTPUT` is the only place decisions
-    are recorded.
+  - No decision is ever recorded in `## CONSIDERING` or `## VALIDATE`. `## OUTPUT` is the only place decisions are recorded.
 Form 3: one or more B entries, listed before any Form 2 list. Status is Blocked, Lane is unresolved, and **Branch** is the
 unresolved string. A B entry is never closed in place. Answering it always re-runs the triage stage.
 -->
@@ -302,7 +250,7 @@ N. **Decided (YYYY-MM-DD)** - <the same decision, restated as one direct sentenc
      - **<label>** - <description>
      - **<label>** - <description>
    - **Recommended**: <label>
-   - **Selected**: <the winning label, character-for-character identical to one of the Options labels>
+   - **Selected**: <a label character-for-character from Options, or: none of the listed options — <the answer as given, or "deferred: <what decides it later>">>
    - **Because**: <one to three sentences of rationale>
    - **Obliges scoping to**: <what the scope stage must now derive as a consequence>
 
@@ -346,8 +294,8 @@ its matching `## OUTPUT` entry.
 - [ ] **Frontmatter is complete and self-consistent** — six labelled lines in order; `Status`/`Lane`/`Branch` agree per the
       header's consistency rules; `Slug` matches the branch's `<slug>` segment; if any section carries an unfillable form,
       `Status` is `Blocked` (blocking form) or `Draft` (non-blocking form), never `Decided`.
-- [ ] **Six CNL sections present in order, nothing after `## OUTPUT`** — the H2 walk reads AS, OBSERVE, CONSIDERING, ORDER,
-      VALIDATE, OUTPUT, none reordered, none missing, none added, no content after `## OUTPUT`.
+- [ ] **Five sections present in order, nothing after `## OUTPUT`** — the H2 walk reads AS, OBSERVE, CONSIDERING, VALIDATE,
+      OUTPUT, none reordered, none missing, none added, no content after `## OUTPUT`.
 - [ ] **AS is one sentence naming a role** — a single sentence naming one of the roster roles, or the section's unfillable form.
 - [ ] **OBSERVE verified against a named commit** — both `**Claimed**` and ``**Verified against `<ref>` at `<sha>`**`` present;
       `<ref>` names the checkout actually read and `<sha>` is a literal hash; every surviving claim carries `path:line`; every
@@ -358,9 +306,6 @@ its matching `## OUTPUT` entry.
       invariants is emitted as the explicit sentence; every **While excluding** entry names a falsifiable check and every
       **Adjacent systems** entry names what must keep holding (a shared path across the two bullets is legal — a duplicated
       claim is not); or the section's unfillable form.
-- [ ] **ORDER is triage's own chain** — the six named spine links are present, in order, one line each, each either derived or
-      emitted as `not derived`; any additional links are in the same `X -> Y` form and sit in dependency order; no step the
-      scope stage should take; no decision recorded; or the section's unfillable form.
 - [ ] **VALIDATE names one reframing** — one to three sentences, exactly one independent frame, independent of `## AS`'s lens,
       with a concrete falsifier; zero anti-goals; no exploration-end fill ("coherent", "actionable"); or the section's
       unfillable form.
@@ -368,7 +313,7 @@ its matching `## OUTPUT` entry.
       blocked literal; then Form 1's exact sentence alone, OR a Form 2 list alone, OR Form 3's `B` entries optionally followed
       by a Form 2 list (Form 1 is never combined); every Form 2 entry marked `**Open**` or `**Decided (date)**` with every
       sub-bullet in its required order; every `**Decided**` entry's `**Selected**` matches one of its own Options labels
-      character-for-character; every entry carries 2-4 Options.
+      character-for-character or is the `none of the listed options — ...` form; every entry carries 2-4 Options.
 - [ ] **No composition-time material leaked** — no `## Composition-Time Self-Check`, no bullets describing the artifact's own
       structure, no HTML comments.
 <!-- ADOPT: Keep `git[ -]stash|worktree` (the pipeline's own one-working-tree guardrail) and add the regexes for your own forbidden surfaces. Replace the example additions in the grep below with this repository's, then delete this marker. -->

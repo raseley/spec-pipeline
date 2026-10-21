@@ -18,8 +18,10 @@ session has to guess.
 
 **Mechanism.** The next stage is never stored. Command Step 2 derives it from which artifacts exist, the
 spec's `**Status**:` line, the branch, and `gh pr` state. Command Step 3 recovers `architect` from the triage
-artifact's `**Lane**:` line and `branch_prefix` from its `**Branch**:` line. After `/resume`, `advance` just
-works.
+artifact's `**Lane**:` line and `branch_prefix` from its `**Branch**:` line. Until the spec is approved the
+artifacts are untracked; from then on they are committed on `<prefix>/<slug>`, so when none is on disk Step 2
+asks `gh` for a PR under each prefix and then looks for the branch before concluding nothing exists. After
+`/resume`, `advance` just works.
 
 ### 2. One stage per call, strictly in sequence; the orchestrator is the only place to steer
 
@@ -37,8 +39,8 @@ you" a checkable condition instead of a judgment call.
 
 **Mechanism.** Command Step 6.6's gate table: no error, no divergent return, empty `open_questions`; triage
 not `Blocked` or malformed and `Decided`; a non-null, clean critique for document stages; `halted` null for
-implement; `validation.passed` for validate. Any Step 4 guard that stops (dirty tree, missing spec) stops
-the chain too.
+implement; `validation.passed` for validate. Any Step 4 guard that stops (dirty tree, refused checkout,
+missing spec, failed artifact commit) stops the chain too.
 
 ### 4. The artifact is the authority; the return is a report
 
@@ -58,10 +60,15 @@ open the artifact. Paraphrasing at render time loses the reasoning, because only
 question still holds it.
 
 **Mechanism.** The `OQ` schema requires `question`, `context`, and 2-4 `options` (a schema bound, so a
-violation forces a retry). `OQ_GUIDANCE` defines the plain-language rule for `context`. The `MIRRORING`
+violation forces a retry), and each field's format rule lives in its schema `description`, which reaches the
+model on every call. `OQ_GUIDANCE` keeps only what a field description cannot carry: the artifact's own
+question section stays technical, and `context` must suffice on its own. The `MIRRORING`
 contract makes the return a verbatim copy of the artifact's question section. The command renders
 `context` verbatim, lists the recommended option first, and records closures in the template's own
-closed-entry shape, keeping **Context** and **Options** verbatim so the closure is a reviewable diff.
+closed-entry shape, keeping **Context** and **Options** verbatim so the closure is a reviewable diff. An
+answer off the list is expected, not an error: every template has an off-list `Selected` form
+(`none of the listed options — <the answer, or "deferred: <what decides it later>">`), so the record never
+maps a developer's answer onto the nearest option.
 
 ### 6. Rules go in the schema where possible; otherwise descriptions plus fail-closed checks
 
@@ -80,8 +87,11 @@ split lives in field descriptions, and the script reports a `routed` return miss
 issues already raised lets it terminate as soon as they are fixed. A structural feedback round has already
 passed a full audit once; redrafting would waste it.
 
-**Mechanism.** `refine()`: compose = draft, one full adversarial audit, at most two rounds of revise plus a
-scoped re-check. Feedback = one reviser plus one critic checking only the feedback points. The critique
+**Mechanism.** `refine()`: compose = draft, one full adversarial audit, then up to the stage's round cap of
+revise plus a scoped re-check: two for triage and scope, one for spec, whose reviser rewrites the largest
+artifact on the top tier and whose residue the gate judges better than a second rewrite would. The spec's
+re-check is partitioned by lens (`recheckScope`): each lens's issues are re-checked within the read that lens
+had, and keep their prefix. Feedback = one reviser plus one critic checking only the feedback points. The critique
 returned is the one after the last write. A `null` critique means the critic died: the command reports
 "verdict unavailable", never clean, and the gate stops. Scope and spec build their own draft and audit
 (principle 8) and then hand both to the same `reviseLoop()`, so a large composition is revised and
@@ -101,7 +111,13 @@ Drafters return fragments, never the file (parallel writers to one file lose eac
 every fragment item lists the anchors it serves. Plain JavaScript computes unassigned, duplicated, and
 uncovered anchors and missing or stray phases; each becomes a known gap handed to the synthesizer and the
 critics, and is reported in the return's `composition`. One synthesizer writes the artifact, and parallel
-lens critics audit it; a dead lens is an issue, never clean. The gate stops when an anchor was listed as a
+lens critics audit it; a dead lens is an issue, never clean. Each lens's read is bounded at every artifact
+size, so the agent count follows the plan but no single critic reads a large spec whole: spec's `phases` lens
+reads only its partition's phase blocks, `template` only the sections above the plan, `fidelity` only its
+partition's goals, design subsections, and phases, and `coherence`, run second and skipped at one partition,
+only the grep hits of files and decisions several phases share. The `phases` and `template` lenses return
+indexes (per-phase agent, dependencies, Design headings, paths, criteria counts, test runs; the design
+headings), and plain JavaScript checks those as `[check]` issues rather than asking a model to. The gate stops when an anchor was listed as a
 gap and the final verdict is not clean. A dead plan agent ends the stage with an error rather than drafting
 without anchors. Caps (`MAX_SCOPE_PARTITIONS`, `MAX_SPEC_PARTITIONS`) bound the agent count; a source with
 more divisions gets coarser partitions, never dropped ones.
@@ -112,9 +128,11 @@ more divisions gets coarser partitions, never dropped ones.
 two-line edit costs minutes and tokens and invites unrelated rewrites.
 
 **Mechanism.** Command Step 1a classifies every refine. Inline edits are applied directly with no workflow
-call, following an eight-rule recording procedure. Only cascading changes (lane, change type, goals,
-non-goals, design, phase decomposition, answers to unfillable ORDER/VALIDATE entries, any blocking answer)
-go back as `feedback`. When unsure, inline.
+call, recording a decision in the template's own closed shape plus the four things a template cannot know
+(date, exact label or off-list form, rationale, status). Once Step 4 has committed the artifacts, each inline
+edit gets its own revision commit. Only cascading changes (lane, change type, goals, non-goals, design,
+phase decomposition, answers to an unfillable `## VALIDATE` entry, an off-list answer that introduces a new
+mechanism, any blocking answer) go back as `feedback`. When unsure, inline.
 
 ### 10. A blocked triage is a result; a malformed return is never turned into a question
 
@@ -131,8 +149,8 @@ re-run. The script's malformed path returns an `error` alongside the artifact an
 **Why.** An idea often carries a wrong premise ("the endpoint already validates this"). Carrying it forward
 builds a spec on sand.
 
-**Mechanism.** Triage ORDER step 1 records every claim as surviving (with `path:line`), falsified (with the
-citation), or non-resolving. Falsifying the premise is a valid outcome and can block triage.
+**Mechanism.** The triage prompt's first ORDER step checks every claim against the tree, and `## OBSERVE`
+records each as surviving (with `path:line`), falsified (with the citation), or non-resolving. Falsifying the premise is a valid outcome and can block triage.
 
 ### 12. The on-disk spec is the single source of truth for implement
 
@@ -140,8 +158,8 @@ citation), or non-resolving. Falsifying the premise is a valid outcome and can b
 silently be ignored.
 
 **Mechanism.** The spec stage returns no phases array. Command Step 3 rebuilds `phases` from the spec file's
-`### Phase N:` headings, `**Agent routing**:` lines, `#### Scope`, and `#### Acceptance Criteria` on every
-implement call.
+`### Phase N:` headings, `**Agent routing**:` lines, `**Design**:` lines, `#### Scope`, and
+`#### Acceptance Criteria` on every implement call, and greps every Design heading before sending its phase.
 
 ### 13. Spend the top tier where defects are expensive
 
@@ -156,12 +174,19 @@ frontmatter. Escalation (`implModel`) is set only when the developer asks, for o
 ### 14. Each phase block is written for its narrowest reader
 
 **Why.** The criteria checker receives `#### Acceptance Criteria` and nothing else, and its verdict halts
-every later phase. A criterion that says "the new field" or "per Phase 2" forces a guess.
+every later phase. A criterion that says "the new field" or "per Phase 2" forces a guess. A criterion that
+checks code shape (a field listing, a definition count) passes a wrong program. And an implementer handed the
+whole spec spends its context on other phases' design.
 
 **Mechanism.** The spec template's phase rules and Part A self-check ("acceptance criteria stand alone",
-"scope enumerates paths"); the spec critic's ORDER step 3; the drafter's VALIDATE step; and, on every
-compose round, a narrowest-reader lens critic per partition that extracts only that partition's phase blocks
-and judges each as if the rest of the spec did not exist.
+"acceptance criteria are behavioural and capped", "design lines resolve"): at most six criteria per phase,
+one command each, passing or failing on behaviour, with an absence grep the only shape check and only for a
+named source. Each phase's `**Design**:` line names the design subsections it implements, so the dev agent
+reads only `### Core Principle`, those subsections, and its phase block, and the reviewer the same plus
+`## Invariance`. On every compose round a `phases` lens per partition reads only that partition's phase
+blocks and judges each as if the rest of the spec did not exist; the `fidelity` lens checks each phase's Tasks
+against the subsections its Design line names. A phase over the cap is collapsed into named tests; a split is
+a plan change the reviser never makes, so it reaches the gate.
 
 ### 15. Verification is split: evidence first, judgment second
 
@@ -179,7 +204,8 @@ dropped. Observations travel to the PR body.
 (the dev self-verifies, then the checker re-runs), for no signal the single validate run would not produce.
 
 **Mechanism.** `SCOPED_TESTS` (built from config) in the dev and checker prompts; the spec template and spec
-critic reject whole-suite criteria; the checker substitutes a narrow selection and marks such criteria
+critic reject whole-suite criteria, and a plain-JS check flags any criterion run equal to a configured suite
+command; the checker substitutes a narrow selection and marks such criteria
 `deferred: true`; validate runs every `suites[]` command once.
 
 ### 17. Halt at the first failing phase; re-enter with only what has not passed
@@ -210,7 +236,9 @@ branches mid-phase corrupts the run.
 **Mechanism.** Dev prompts forbid staging, committing, branch operations, worktrees, and `git stash`. Only two
 parties write git state: the command, and the implement stage's per-phase committer, which commits a phase
 only after its checker and review pass, never amends or bypasses hooks, and never edits source to satisfy a
-hook (that would bypass the review). The command creates the branch at Step 4 and refuses to proceed on a dirty tree that blocks checkout. Adopters enforce it twice: a
+hook (that would bypass the review). The command creates the branch and commits the approved artifacts at
+Step 4, commits each later artifact edit at Step 4a, and refuses to proceed on a dirty tree that blocks
+checkout. The committer never stages the specs directory, so artifact edits never ride in a phase commit. Adopters enforce it twice: a
 steering anti-pattern and a `permissions.deny` entry.
 
 ### 20. Ship keeps the record and cleans the tree
@@ -218,10 +246,13 @@ steering anti-pattern and a `permissions.deny` entry.
 **Why.** The artifacts are the "why" behind a change and belong in history. Left on the base branch they
 accumulate into clutter that future agents read as current intent.
 
-**Mechanism.** The implementation is already committed phase by phase. Ship commits any later fix on its own,
-then exactly this slug's three artifacts in a commit of their own, links the spec by that commit's SHA
-permalink, opens the PR, and only then commits their removal (`chore(specs): remove <slug> pipeline
-artifacts`). This relies on merge commits; `ship.remove_artifacts_after_pr: false` keeps the artifacts for
+**Mechanism.** The artifacts are committed alone at spec approval (`docs(specs): add <slug> pipeline
+artifacts`, the branch's first commit), every later edit to them gets a `docs(specs): revise <slug>: ...`
+follow-up, and the implementation is committed phase by phase on top. Ship commits any later fix on its own,
+links the spec by the SHA permalink of the pre-removal tip (whose tree holds the artifacts' final text, where
+the first spec commit may be superseded), opens the PR, and only then commits their removal
+(`chore(specs): remove <slug> pipeline artifacts`). A rework that revises an artifact updates the PR's
+permalinks to the new tip. This relies on merge commits; `ship.remove_artifacts_after_pr: false` keeps the artifacts for
 squash-merge repositories.
 
 ### 21. The developer never types JSON or confirms a slug
@@ -240,5 +271,6 @@ no VALIDATE step has no independent cross-check.
 
 **Mechanism.** Every agent prompt in the script follows `AS.` (role), `OBSERVE.` (evidence), `CONSIDERING.`
 (constraints and sources), `ORDER.` (ordered reasoning), `VALIDATE.` (an independent cross-check), `OUTPUT.`
-(the exact output). The triage artifact itself uses the same six sections, a frame taken from "The Geometry
-of Intent".
+(the exact output). The triage artifact itself uses five of the same sections, a frame taken from "The
+Geometry of Intent"; `ORDER.` stays in the prompts as the ordered reasoning but is not recorded in the
+artifact, because the scope stage needs the verified facts and decisions, not the chain that produced them.

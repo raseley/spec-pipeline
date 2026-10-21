@@ -18,7 +18,8 @@ args = {
   idea,        // triage only: the developer's raw prose
   feedback,    // optional: this round's notes for a structural refine; only when the artifact exists on disk
   architect,   // scope | spec | implement: one of config.lanes[].architect
-  phases,      // implement only: [{ title, agent, scope, acceptance }] rebuilt from the on-disk spec
+  phases,      // implement only: [{ title, agent, design, scope, acceptance }] rebuilt from the on-disk spec;
+               // design is the **Design**: line split on "; " ([] for None, null for a spec without the line)
   model,       // optional: overrides drafter, reviser, dev, and review tiers (critics, checker, validate keep theirs)
   implModel    // optional: implement dev calls only; wins over model; set to config.models.escalation on request
 }
@@ -35,11 +36,13 @@ command keeps it for branch and ship operations.
 | triage | `{stage: "triage", triage, critique}` | dead drafter: `{stage, error}`; malformed: `{stage, error, triage: {...status: "malformed"}, critique}` |
 | scope | `{stage: "scope", scope: {scope_path, open_questions}, critique, composition}` | dead plan or drafter: `{stage, error, composition}` |
 | spec | `{stage: "spec", spec: {spec_path, open_questions}, critique, composition}` (never phases) | dead plan or drafter: `{stage, error, composition}` |
-| implement | `{stage: "implement", results: [{phase, passed, sound, criteria, review, commit?, error?}], halted}` | `{stage, error}` for missing or empty `phases`, missing or unknown `architect`, or a phase `agent` not in the routable roster |
+| implement | `{stage: "implement", results: [{phase, passed, sound, criteria, review, commit?, error?}], halted}` | `{stage, error}` for missing or empty `phases`, missing or unknown `architect`, a phase `agent` not in the routable roster, or a phase `design` that is neither null nor an array of headings |
 | validate | `{stage: "validate", validation: {passed, suites: [{suite, passed, summary, failures?}]}}` | `{stage, error}` (dead runner) |
 
 - `triage.status` is `routed` or `blocked` from the agent; `malformed` only from the script.
-- `critique` is `{clean, issues}` or `null` (critic died: unknown, never clean).
+- `critique` is `{clean, issues}` or `null` (critic died: unknown, never clean). On a scope or spec compose
+  round each issue carries its lens prefix (`[template] `, `[phases:<id>] `, `[fidelity:<id>] `, `[coherence] `,
+  `[tree] `, or `[check] ` for a plain-JS check); spec's re-check keeps the prefixes, scope's does not.
 - `sound` is `null` whenever the review did not run (criteria unmet, dead dev or checker), `false` when it ran
   and found a blocking concern or died.
 - Each `criteria` row is `{criterion, met, deferred}`. Each `review.concerns` row is
@@ -68,21 +71,22 @@ in #2 and #3 are em dashes, and that difference is load-bearing.
 | 7 | `**Date**:`, `**Status**:`, `**Source**:` | spec frontmatter |
 | 8 | Status tokens: triage `Draft` / `Decided` / `Blocked`; scope `Draft`; spec `Draft` / `Final` | templates, command Step 2 |
 | 9 | `**Lane**: unresolved` and `**Branch**: unresolved - triage blocked on routing` | triage template, command Step 3 |
-| 10 | `## AS`, `## OBSERVE`, `## CONSIDERING`, `## ORDER`, `## VALIDATE`, `## OUTPUT` | triage template, script prompts, `blocked_on` enum `["AS","OBSERVE","CONSIDERING"]` |
+| 10 | `## AS`, `## OBSERVE`, `## CONSIDERING`, `## VALIDATE`, `## OUTPUT` (exactly five; there is no `## ORDER` section) | triage template, script prompts, `blocked_on` enum `["AS","OBSERVE","CONSIDERING"]` |
 | 11 | `**Hand-off to scoping**:` (routed sentence, and the blocked sentence `**Hand-off to scoping**: none. Triage is blocked - see B<n> below. The scope stage must not be run for this slug until the blocking entry is resolved.`) | triage template |
 | 12 | Triage entries `N. **Open** - `, `N. **Decided (YYYY-MM-DD)** - `, `B<n>. **Blocked - ## <AS\|OBSERVE\|CONSIDERING>** - ` and sub-bullets `**Context**`, `**Options**`, `**Recommended**`, `**Closes on**`, `**Selected**`, `**Because**`, `**Obliges scoping to**`, `**Unblocks on**` | triage template, command Step 1a |
-| 13 | Scope entries `N. [Question] — Closed by [...]`, closed clause `**Closed (YYYY-MM-DD)** — [decision] — [who ruled]`, sub-bullets `**Context**`, `**Options**` (inline, semicolon-separated), `**Recommended**` | scope template, command |
-| 14 | Spec entries `N. **[decision]**`, `N. **Closed (YYYY-MM-DD)** — [decision]` with `**Context** / **Options**` preserved and `**Selected**: label — why` | spec template, command |
+| 13 | Scope entries `N. [Question] — Closed by [...]`, closed clause `**Closed (YYYY-MM-DD)** — Selected: [label, or the off-list form] — [rationale, or who ruled]`, sub-bullets `**Context**`, `**Options**` (inline, semicolon-separated), `**Recommended**` | scope template, command |
+| 14 | Spec entries `N. **[decision]**`, `N. **Closed (YYYY-MM-DD)** — [decision]` with `**Context** / **Options**` preserved and `**Selected**: label — why`; every template's `Selected` is a label from the entry's own Options or the off-list form `none of the listed options — <answer, or "deferred: <what decides it later>">` | all three templates, command Steps 1a and 6.5 |
 | 15 | `## Executive Summary`, `## Goals`, `## Non-Goals`, `## Files Affected` (`**Reads**:`, `**Creates or modifies**:`, `**Not yet enumerated**:`), `## Dependencies`, `## Open Questions` | scope template, script scope prompts |
-| 16 | `## Implementation Plan`, `### Phase N: `, `**Goal**:`, `**Agent routing**:`, `**Depends on**:`, `#### Scope` (`**IN**:` / `**OUT**:`), `#### Tasks`, `#### Tests`, `#### Acceptance Criteria`, `## Invariance` (`**Reframing**:`, `**Surviving claim**:`, `**Falsifier**:`), `## Standards References`, `## Open Questions` (last) | spec template, script spec prompts, command phase reconstruction |
+| 16 | `## Implementation Plan`, `### Phase N: `, `**Goal**:`, `**Agent routing**:`, `**Depends on**:`, `**Design**:` (`; `-separated `## Proposed Design` subsection headings, or `None`), `#### Scope` (`**IN**:` / `**OUT**:`), `#### Tasks`, `#### Tests`, `#### Acceptance Criteria`, `## Invariance` (`**Reframing**:`, `**Surviving claim**:`, `**Falsifier**:`), `## Standards References`, `## Open Questions` (last) | spec template, script spec prompts, command phase reconstruction |
 | 17 | `END OF EMITTED ARTIFACT` fence; `## Composition-Time Self-Check` with `### Part A — decidable from the artifact alone` and `### Part B — requires the working tree` | all three templates, script critic prompts |
 | 18 | Spec Part B sub-headings `#### Grounding` and `#### Project Invariants` | spec template |
 | 19 | Artifact names `<specs_dir>/<slug>-triage.md`, `<slug>-scope.md`, `<slug>.md`; templates `triage-template.md`, `scope-template.md`, `spec-template.md` beside them | everything |
-| 20 | Unfillable forms: `**<SECTION> is unfillable.** ... Handed back as ## OUTPUT entry B<n>.` (blocking) and `... Raised as ## OUTPUT entry <n>, whose **Closes on** carries that same decision.` (non-blocking); a single underivable ORDER link `N. <link> - not derived: <why>.` | triage template, script triage prompt |
-| 21 | Agent-call labels `triage`, `triage:critic`, `triage:revise`; `scope:plan`, `scope:draft:<partition>`, `scope:synthesize`, `scope:critic:<lens>`, `scope:critic`, `scope:revise`; `spec:plan`, `spec:draft:<partition>`, `spec:synthesize`, `spec:critic:<lens>`, `spec:critic`, `spec:revise`; `impl:<title>`, `verify:checks:<title>`, `verify:review:<title>`, `commit:<title>`, `validate:full-suite` | script |
+| 20 | Unfillable forms: `**<SECTION> is unfillable.** ... Handed back as ## OUTPUT entry B<n>.` (blocking) and `... Raised as ## OUTPUT entry <n>, whose **Closes on** carries that same decision.` (non-blocking, `## VALIDATE` only) | triage template, script triage prompt |
+| 21 | Agent-call labels `triage`, `triage:critic`, `triage:revise`; `scope:plan`, `scope:draft:<partition>`, `scope:synthesize`, `scope:critic:<lens>`, `scope:critic`, `scope:revise`; `spec:plan`, `spec:draft:<partition>`, `spec:synthesize`, `spec:critic:<lens>` (lenses `phases:<partition>`, `template`, `fidelity:<partition>`, `coherence`), `spec:critic:recheck:<lens>`, `spec:critic`, `spec:revise`; `impl:<title>`, `verify:checks:<title>`, `verify:review:<title>`, `commit:<title>`, `validate:full-suite` | script |
 | 22 | Phase titles `Triage`, `Scope`, `Spec`, `Implement`, `Validate` in `meta.phases` and `phase()` | script |
 | 23 | Inline-refine rationale `selected by the developer without stated rationale` | command |
 | 24 | Removal commit message `chore(specs): remove <slug> pipeline artifacts` | command |
+| 26 | Artifact commit subjects `docs(specs): add <slug> pipeline artifacts` (the spec commit at approval, Step 4) and `docs(specs): revise <slug>: <what changed>` (every later artifact edit, Step 4a); neither carries a `Spec-Phase` trailer, and Step 2 rule 3 does not count them as implementation commits | command |
 | 25 | Phase-commit trailer `Spec-Phase: <slug> / <title>` (the pass record re-entry slicing reads from `git log` after `/resume`) | script implement committer, command Steps 3 and 6.3 |
 
 ## 4. The three closed-entry shapes, side by side
@@ -129,7 +133,7 @@ closed in place; answering one re-runs triage.
 ```
 
 ```markdown
-2. Does the refund ceiling apply per order or per payment capture? — **Closed (2026-03-14)** — Per order — the developer
+2. Does the refund ceiling apply per order or per payment capture? — **Closed (2026-03-14)** — Selected: Per order — selected by the developer without stated rationale
    - **Context**: <unchanged>
    - **Options**: Per order — <meaning>; Per capture — <meaning>
    - **Recommended**: Per order
@@ -152,7 +156,8 @@ closed in place; answering one re-runs triage.
 
 Rules common to all three (command Step 1a): keep the number, never renumber; stamp the session date; keep
 Context and Options verbatim; write the selected label character-for-character from the entry's own Options
-(strip the ` (Recommended)` display suffix); record the developer's rationale or exactly
+(strip the ` (Recommended)` display suffix), or, for an answer off the list, the off-list form with the
+answer as given (never mapped onto the nearest option); record the developer's rationale or exactly
 `selected by the developer without stated rationale`; never add a section to hold decisions. An artifact
 whose entries are all closed keeps the numbered list; the no-questions sentence is only for a stage that
 raised none.
@@ -166,11 +171,12 @@ raised none.
 | triage | `Blocked` | drafter or reviser | Lane `unresolved`, Branch `unresolved - triage blocked on routing`, at least one `B` entry, a blocking form in `## AS`/`## OBSERVE`/`## CONSIDERING`; all four together |
 | scope | `Draft` | drafter | always; scope has no blocking state |
 | spec | `Draft` | drafter | written, not yet approved |
-| spec | `Final` | the command, at Step 4 | approved for implementation (entering implement is the approval) |
+| spec | `Final` | the command, at Step 4 | approved for implementation and committed on `<prefix>/<slug>` with the other two artifacts; a later revision stays `Final` |
 
 Transitions: `Blocked → Draft/Decided` only through a structural triage re-run that answers the block (never
 by hand-editing). `Draft → Decided` (triage) when the last open entry is closed inline. `Draft → Final` (spec)
-only when entering implement. Revisers leave frozen frontmatter lines byte-identical.
+only at approval (Step 4, before entering implement); nothing moves it back. Revisers leave frozen frontmatter
+lines byte-identical.
 
 ## 6. What the command edits inline
 
@@ -180,11 +186,15 @@ The command's direct `Edit`s (no workflow call) are limited to:
 - wording, terminology, and small factual corrections within a template section's bounds;
 - the spec's `**Status**: Draft` → `Final` at Step 4.
 
+From the spec commit on, each such edit is followed by its own revision commit (#26); it is never amended
+into an earlier commit.
+
 It never edits agents, rules, `.claude/settings.json`, or `.claude/spec-pipeline.json`, and never moves a
 triage artifact out of `Blocked` by hand.
 
 ## 7. Prompt frame
 
 Every agent prompt in the script uses `AS. / OBSERVE. / CONSIDERING. / ORDER. / VALIDATE. / OUTPUT.`, and the
-triage artifact's six sections mirror it (a frame from "The Geometry of Intent"). Keep it when adding or
+triage artifact's five sections mirror all of it but `ORDER.`, which stays in the prompts as the ordered
+reasoning and is not recorded in the artifact (a frame from "The Geometry of Intent"). Keep it when adding or
 changing a prompt.

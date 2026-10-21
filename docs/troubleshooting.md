@@ -43,8 +43,8 @@ source usually mean the plan hit its 6-partition cap; split the workstream at tr
 
 ### A scope or spec run spawned many agents
 
-That is by design for a large source: up to 6 drafters plus one lens critic per partition, capped by the
-script itself. The `composition` line reports `agents_run`. A small change plans one partition and runs a
+That is by design for a large source: up to 6 drafters plus one lens critic per partition (two for spec: a
+`phases` and a `fidelity` lens, beside one `template` and one `coherence` lens), capped by the script itself. The `composition` line reports `agents_run`. A small change plans one partition and runs a
 handful of agents.
 
 ### Implement halted with "phase passed but its commit failed"
@@ -121,7 +121,31 @@ that a fresh run would not use.
 ### "git refused the checkout" when entering implement
 
 Uncommitted changes conflict with checking out the base branch. Commit or discard them, then `advance`. The
-pipeline never stashes.
+pipeline never stashes. If instead git refuses to check out `<prefix>/<slug>` because untracked artifacts
+would be overwritten, that branch already holds committed artifacts for this slug and the copies on disk
+were written elsewhere; decide which copy survives, remove the other, then `advance`.
+
+### The spec commit failed at approval
+
+Usually a pre-commit hook. The spec already reads `Final` on disk, so the slug stays at implement and the
+next `advance` retries the commit; implement does not start until it lands. Fix the hook's complaint first.
+
+### My artifacts disappeared after switching branches
+
+After approval they are tracked on `<prefix>/<slug>`, so they are on disk only with that branch checked
+out. Say `advance` (the orchestrator finds the PR or the branch from the slug) or check the branch out.
+
+### Implement stopped: a Design heading does not resolve
+
+A phase's `**Design**:` line names a heading that is not a `### ` subsection of `## Proposed Design`,
+usually after a hand-edit renamed one. Fix the heading or the line (`refine:` inline), then `advance`. The
+phase was not sent.
+
+### The spec stopped at the gate with issues after one revise round
+
+The spec gets one revise round by design; what it leaves flagged is yours to judge. Each issue names its lens.
+`advance` approves the spec as written; `refine:` addresses the issues first. An issue saying a phase needs
+a split is a plan change no revise round makes: refine with the split you want.
 
 ### We squash-merge and the spec permalink is dead
 
@@ -132,7 +156,8 @@ A squash merge drops the spec commit the permalink points at. Either enable merg
 
 With `remove_artifacts_after_pr: true` the PR must link by SHA permalink, because the removal commit deletes
 the file from the branch tip. If you see a branch-path link with removal enabled, the command deviated; edit
-the PR body to `<repo-url>/blob/<spec-sha>/<specs_dir>/<slug>.md`.
+the PR body to `<repo-url>/blob/<spec-sha>/<specs_dir>/<slug>.md`, where `<spec-sha>` is the parent of the
+newest removal commit.
 
 ### `gh` errors during stage derivation or ship
 

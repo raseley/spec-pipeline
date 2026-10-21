@@ -42,7 +42,8 @@ check "#8 spec status" 'Draft' $SPE; check "#8 spec status" 'Final' $SPE
 check "#9 unresolved lane"   '**Lane**: unresolved' $TRI $CMD
 check "#9 unresolved branch" '**Branch**: unresolved - triage blocked on routing' $TRI $CMD
 # 10 operator headings
-for h in AS OBSERVE CONSIDERING ORDER VALIDATE OUTPUT; do check "#10 operator heading" "## $h" $TRI $WF; done
+for h in AS OBSERVE CONSIDERING VALIDATE OUTPUT; do check "#10 operator heading" "## $h" $TRI $WF; done
+if grep -q '^## ORDER' $TRI; then echo "FAIL  #10 triage template still has a ## ORDER section"; fails=$((fails+1)); else echo "PASS  #10 no ## ORDER section: $TRI"; fi
 # 11 hand-off sentences
 check "#11 hand-off label" '**Hand-off to scoping**:' $TRI
 check "#11 blocked hand-off" '**Hand-off to scoping**: none. Triage is blocked - see B' $TRI
@@ -54,15 +55,17 @@ for l in '**Open** - ' '**Decided (' '**Blocked - ## ' '**Context**' '**Options*
 for l in '] — Closed by [' '**Closed (' '**Context**' '**Options**' '**Recommended**'; do check "#13 scope entry" "$l" $SCO; done
 # 14 spec entry shapes
 for l in '**Closed (' '**Context**' '**Options**' '**Selected**'; do check "#14 spec entry" "$l" $SPE; done
+check "#14 off-list Selected" 'none of the listed options — ' $TRI $SCO $SPE
 # 15 scope sections
 for l in '## Executive Summary' '## Goals' '## Non-Goals' '## Files Affected' '**Reads**:' '**Creates or modifies**:' '**Not yet enumerated**:' '## Dependencies' '## Open Questions'; do
   check "#15 scope section" "$l" $SCO; done
 check "#15 scope section in script" '## Executive Summary' $WF
 # 16 spec sections
-for l in '## Implementation Plan' '### Phase ' '**Goal**:' '**Agent routing**:' '**Depends on**:' '#### Scope' '**IN**:' '**OUT**:' '#### Tasks' '#### Tests' '#### Acceptance Criteria' '## Invariance' '**Reframing**:' '**Surviving claim**:' '**Falsifier**:' '## Standards References' '## Open Questions'; do
+for l in '## Implementation Plan' '### Phase ' '**Goal**:' '**Agent routing**:' '**Depends on**:' '**Design**:' '#### Scope' '**IN**:' '**OUT**:' '#### Tasks' '#### Tests' '#### Acceptance Criteria' '## Invariance' '**Reframing**:' '**Surviving claim**:' '**Falsifier**:' '## Standards References' '## Open Questions'; do
   check "#16 spec section" "$l" $SPE; done
 check "#16 spec section in script" '## Implementation Plan' $WF
 check "#16 spec section in command" '### Phase ' $CMD
+check "#16 design line" '**Design**:' $WF $CMD
 # 17 self-check fence
 check "#17 fence" 'END OF EMITTED ARTIFACT' $TRI $SCO $SPE
 check "#17 self-check" '## Composition-Time Self-Check' $TRI $SCO $SPE
@@ -77,9 +80,11 @@ for t in Triage Scope Spec Implement Validate; do
   if grep -qE "['\"]$t['\"]" "$WF" 2>/dev/null; then echo "PASS  #22 phase title: $t"
   else echo "FAIL  #22 phase title '$t' not found as a quoted string in $WF"; fails=$((fails+1)); fi
 done
-# 23-24 command-only literals
+# 23-24, 26 command-only literals
 check "#23 inline refine rationale" 'selected by the developer without stated rationale' $CMD
 check "#24 spec removal commit" 'chore(specs): remove <slug> pipeline artifacts' $CMD
+check "#26 spec commit" 'docs(specs): add <slug> pipeline artifacts' $CMD
+check "#26 revision commit" 'docs(specs): revise <slug>: ' $CMD
 # 25 phase-commit trailer, written by the implement committer and read back by re-entry slicing
 check "#25 phase-commit trailer" 'Spec-Phase: ' $WF $CMD
 

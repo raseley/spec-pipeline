@@ -75,19 +75,20 @@ Every path below is built from `<specs_dir>`, and every git command from `<base>
 
 ## Terms
 
-- **artifact**: a file under `<specs_dir>/` for this slug (`<specs_dir>/<slug>-triage.md`, `<specs_dir>/<slug>-scope.md`, or `<specs_dir>/<slug>.md`).
+- **artifact**: a file under `<specs_dir>/` for this slug (`<specs_dir>/<slug>-triage.md`, `<specs_dir>/<slug>-scope.md`, or `<specs_dir>/<slug>.md`). Untracked until Step 4 commits it; after that, tracked on `<prefix>/<slug>` and on disk only with that branch checked out.
 - **stage**: one step of the pipeline: `triage`, `scope`, `spec`, `implement`, or `validate`. Ship follows validate and is done by you (Step 7).
 - **the next stage**: the stage the next advance runs. It is never stored. You work it out from which files exist, plus git and `gh` (Step 2).
 - **return**: what one workflow call hands back to you.
 - **carry forward**: reuse a value from the previous return in the next call's `args`.
 - **lane table**: `config.lanes[]`. Each lane has a `name`, an `architect`, a `dev`, and optional `other_agents`. `config.unlaned_agents` are routable on a phase but belong to no lane.
-- **inline refine**: a refine you apply yourself with a direct `Edit` to the artifact, with no workflow call (Step 1a).
+- **inline refine**: a refine you apply yourself with a direct `Edit` to the artifact, with no workflow call (Step 1a); once the artifact is tracked, followed by one revision commit (Step 4a).
 - **structural refine**: a refine that re-runs the same stage with the developer's notes as `feedback` (Step 1a).
 - **blocked triage**: a triage artifact whose `**Status**:` line reads exactly `Blocked`. Triage declined to route, and no downstream stage may run until it is resolved.
 - **divergent return**: a triage return whose status disagrees with the `**Status**:` line of the artifact on disk (Step 6 item 1). The file wins.
 - **malformed return**: a triage return with an `error` string and `triage.status === "malformed"`. It is a drafter or schema failure, not a triage decision (Step 6 item 1).
 - **deferred criterion**: an acceptance criterion with `deferred: true`. It named a whole-suite run, a narrower selection ran instead, and validate settles it (Step 6 item 3).
 - **observation vs blocking concern**: the two `severity` values of an architect review concern. A blocking concern halts the phase. An observation is true but does not halt it (Step 6 item 3).
+- **lens**: one critic of the spec or scope compose panel, named by its label prefix on each issue it raises (spec: `[template]`, `[phases:<partition id>]` or `[phases:unassigned]`, `[fidelity:<partition id>]` or `[fidelity:unassigned]`, `[coherence]`; scope: `[template]`, `[fidelity:<partition id>]` or `[fidelity:unassigned]`, `[tree]`; `[check]` for a plain-JS check) (Step 6 item 2).
 
 ## Step 1 — classify the intent
 
@@ -96,9 +97,9 @@ Match `$ARGUMENTS` against these four shapes:
 | Developer prose | Intent | What you assemble |
 |-----------------|--------|-------------------|
 | free-form idea text (anything not matching the rows below) | **start** | `idea` = the prose; `slug` = kebab-cased from it; `stage` = `triage` (or the next stage if `<slug>-*.md` already exist — see Step 2) |
-| `advance` (or "next", "go on", "proceed") | **advance** | `stage` = the next stage (Step 2); carry forward `architect` from the prior return; when entering `implement`, reconstruct `phases` from `<specs_dir>/<slug>.md` (always — see Step 3) |
+| `advance` (or "next", "go on", "proceed") | **advance** | `stage` = the next stage (Step 2); carry forward `architect` from the prior return; when entering `implement`, reconstruct `phases` from `<specs_dir>/<slug>.md` (always — see Step 3); when entering `implement`, run Step 4 first (it approves and commits the spec the first time through) |
 | `refine: <notes>` (or "refine", "revise", "change …") | **refine** | classify the notes first (Step 1a): **inline** ⇒ edit the artifact yourself, **no Workflow call**; **structural** ⇒ the **same** `stage` as last run, with this round's notes as `feedback`; an answer to a blocking (B) triage entry is always structural |
-| `rewind to <stage>` | **rewind** | the named `stage`; classify the correction per Step 1a (inline edit vs. `feedback`); expect downstream stages to re-run afterward |
+| `rewind to <stage>` | **rewind** | the named `stage`; classify the correction per Step 1a (inline edit vs. `feedback`); expect downstream stages to re-run afterward; a rewind to `triage`, `scope` or `spec` after the spec commit edits tracked files — commit each stage's revision per Step 4a before advancing again |
 
 A request about tiers rides along with any of these: "run this stage on opus" sets `model`
 for that one call; "retry that phase on <tier>" or "escalate" sets `implModel` (Step 3).
@@ -112,41 +113,44 @@ developer's notes:
   stage's open questions, wording or terminology fixes, small factual corrections, and adding
   or dropping a detail whose consequences don't cascade into other sections. Apply these
   yourself with a direct `Edit` to `<specs_dir>/<slug>-*.md`. Stay within the template's
-  section bounds. Close any Open Questions entry a note answers. Then report what you
+  section bounds. Close any Open Questions entry a note answers. If the artifact is tracked
+  (Step 4 has committed it), commit the edit on its own per Step 4a. Then report what you
   changed and stop. **No Workflow call.** A two-line decision is a 30-second edit, not an
-  agent fan-out.
+  agent fan-out; after the spec commit it is also one git commit.
 
   **Recording a decision.** Each template defines the closed-entry shape for its question
   section — triage's `## OUTPUT` Form 2 **Decided** entry, scope's and spec's `## Open Questions`
   closed entry — in the comment block above that section. The three shapes differ on purpose;
-  use the one the artifact's own template defines. Close the answered entry in that shape.
-  Edit that entry and nothing else:
-    1. Keep the entry's number. Never renumber the list. A closed entry stays in place so
-       references to "question 3" survive. An artifact whose entries are now all closed keeps
-       the numbered list. The no-questions sentence is for a stage that surfaced none.
-    2. Stamp the closure with the session date.
-    3. Leave `**Context**` and `**Options**` verbatim. Spec's shape collapses them to one line,
-       still verbatim. Keeping them verbatim makes the closure a reviewable diff rather than
-       an essay.
-    4. Write the selected label character-for-character from the entry's own Options list.
-       Strip any ` (Recommended)` display suffix (Step 6.5). Never paraphrase the label.
-    5. Record the developer's stated rationale. Where they gave none, write exactly
-       `selected by the developer without stated rationale`. Never manufacture a rationale.
-       Triage's `**Obliges scoping to**` is the only new prose you may write. Write it only
-       where the selected option's own description creates a derivation obligation.
-    6. Never add a section to hold decisions. Never record a decision outside the question section.
-    7. **Status.** Scope and spec stay `Draft`. A spec advances to `Final` only at approval
-       (Step 4). A triage artifact is re-evaluated. It becomes `Decided` when no `**Open**`
-       marker, no `B` entry, and no unfillable form remains anywhere. Otherwise it stays `Draft`.
-    8. Two kinds of closure are structural, not inline. Send them back as `feedback`:
-       - an entry that a triage `## ORDER` or `## VALIDATE` unfillable form raised (that
-         section must be written as specifically as the template requires);
-       - any answer that invalidates a section: triage's lane or change type; scope's goals,
-         non-goals, or files-affected map; spec's goals, non-goals, design, Invariance section,
-         or phase decomposition.
+  use the one the artifact's own template defines. Close the answered entry in that shape,
+  keeping its number and its **Context** and **Options** as the template says, and edit
+  nothing else. Never add a section to hold decisions, and never record a decision outside
+  the question section. Four things the template cannot know:
+    1. **Date.** Stamp the closure with the session date. The artifact has no clock.
+    2. **Label.** When the developer picked a listed option, write its label
+       character-for-character from the entry's own Options list, stripping the
+       ` (Recommended)` display suffix Step 6.5 added; never paraphrase it. When they answered
+       off the list, use the template's off-list `Selected` form and record the answer as they
+       gave it; never map it onto the nearest option.
+    3. **Rationale.** Record the developer's stated rationale. Where they gave none, write
+       exactly `selected by the developer without stated rationale`. Never manufacture one.
+       Triage's `**Obliges scoping to**` is the only new prose you may write, and only where
+       the selected option's own description creates a derivation obligation.
+    4. **Status.** Scope stays `Draft`. A spec is `Draft` until Step 4 approves it and `Final`
+       after; an inline edit never moves it either way, and a revision of an approved spec
+       stays `Final`. A triage artifact is re-evaluated: it becomes `Decided` when no
+       `**Open**` marker, no `B` entry, and no unfillable form remains anywhere; otherwise it
+       stays `Draft`.
 
-       The spec reviser must re-read the scope before touching Goals or Non-Goals. An inline
-       edit would skip exactly that check.
+  Two kinds of closure are structural, not inline. Send them back as `feedback`:
+  - an entry that a triage `## VALIDATE` unfillable form raised (that section must be written
+    as specifically as the template requires);
+  - any answer that invalidates a section: triage's lane or change type; scope's goals,
+    non-goals, or files-affected map; spec's goals, non-goals, design, Invariance section, or
+    phase decomposition. An off-list answer that introduces a mechanism the artifact does not
+    describe is usually this kind.
+
+  The spec reviser must re-read the scope before touching Goals or Non-Goals. An inline
+  edit would skip exactly that check.
 
   **Answering a blocking (`B`) entry is always structural, never inline.** A blocking answer
   changes the lane or the change type, or splits the workstream, so it cascades through every
@@ -169,6 +173,28 @@ When unsure, prefer inline. The workflow round is the escalation, not the defaul
 The stage is **never stored**. Work it out each time from which files exist under
 `<specs_dir>/` and from git and `gh`, using the rules below. The first rule that matches wins.
 
+**Where the artifacts live.** Until Step 4 commits them, a slug's artifacts are untracked and
+visible from any branch. From the spec commit on they are tracked on `<prefix>/<slug>` and
+are on disk only while that branch is checked out. So before applying the rules, when no
+`<specs_dir>/<slug>-*.md` is on disk, proceed in this order:
+
+1. Query PRs for **every** prefix in `<prefixes>` first, open and merged alike
+   (`gh pr list --head <prefix>/<slug> --state all`, once per prefix). The triage artifact
+   that records the prefix may not be on disk, so never assume one. If a PR exists, rules 1
+   and 2 answer from the query alone. Check nothing out. This is also how a **start** intent
+   on a slug that collides with an old merged branch is answered: by the PR query, not by a
+   checkout.
+2. Only when no PR exists, look for the branch, locally and on `<remote>`, under every prefix
+   (`git branch --list '<prefix>/<slug>'` and
+   `git branch -r --list '<remote>/<prefix>/<slug>'`). If one exists, check it out (Step 4's
+   dirty-tree guard applies; `git checkout -t <remote>/<prefix>/<slug>` when only the remote
+   has it) and re-read `<specs_dir>/`.
+3. A branch that exists with no PR and no `<specs_dir>/<slug>-*.md` on its tip is a ship
+   that was closed unmerged: Step 7.4's removal commit landed and the PR was closed. Report
+   it and stop. The only move is the restore recipe under **Rework after ship** (Step 7).
+
+Rule 9 applies only when neither the files, nor a PR, nor a branch exist.
+
 **Precondition, checked before rule 1.** If `<specs_dir>/<slug>-triage.md` exists and its
 `**Status**:` line reads exactly `Blocked`, the slug is at a **blocked** triage. This holds
 regardless of what other artifacts, branches, or PRs exist for the slug. Report the
@@ -179,10 +205,10 @@ Match the token exactly.
 
 1. a merged PR for `<prefix>/<slug>` exists (`gh pr list --head <prefix>/<slug> --state merged`) ⇒ **done** (report it; the pipeline does not run past ship).
 2. an open PR for `<prefix>/<slug>` exists (`gh pr list --head <prefix>/<slug> --state open`) ⇒ **shipped** (report the PR URL; nothing left to advance).
-3. `<slug>.md` exists with `Status: Final` **and** the `<prefix>/<slug>` branch carries implementation changes (committed or in the working tree) with no PR yet **and** a `validate` stage has returned `passed: true` this session since the last code change ⇒ at **ship**; **advance** runs the ship step (commit → push → open PR — see Step 7).
-4. `<slug>.md` exists with `Status: Final` **and** the branch carries implementation changes with no PR yet (validate not yet passed, or its pass predates further code changes, or unknown — e.g. after `/resume`) ⇒ at **validate**; **advance** runs the `validate` stage. Validation writes nothing and is idempotent. When in doubt, validate again rather than assume a prior pass.
-5. `<slug>.md` exists with `Status: Final` ⇒ at **implement**.
-6. `<slug>.md` exists with `Status: Draft` ⇒ spec drafted; **advance** runs `implement`, **refine** re-runs `spec`.
+3. `<slug>.md` exists with `Status: Final` **and** the `<prefix>/<slug>` branch carries implementation commits (any commit on `<base>..<prefix>/<slug>` other than the `docs(specs):` artifact commits and the `chore(specs):` removal commit) or implementation changes in the working tree, with no PR yet **and** a `validate` stage has returned `passed: true` this session since the last code change ⇒ at **ship**; **advance** runs the ship step (commit → push → open PR — see Step 7).
+4. `<slug>.md` exists with `Status: Final` **and** the branch carries implementation commits or working-tree changes as in rule 3, with no PR yet (validate not yet passed, or its pass predates further code changes, or unknown — e.g. after `/resume`) ⇒ at **validate**; **advance** runs the `validate` stage. Validation writes nothing and is idempotent. When in doubt, validate again rather than assume a prior pass.
+5. `<slug>.md` exists with `Status: Final` ⇒ at **implement** (the spec is approved and committed on `<prefix>/<slug>` by Step 4, and no implementation commit has landed yet). **refine** at a Final spec: an inline refine edits the tracked file and commits it per Step 4a; a structural refine re-runs `spec` as a `feedback` round on the tracked artifact, and its return is committed per Step 4a (Step 6 item 2). The spec stays `Final` either way.
+6. `<slug>.md` exists with `Status: Draft` ⇒ spec drafted; **advance** approves the spec (Step 4: branch, Final, commit) and then runs `implement`, **refine** re-runs `spec`.
 7. `<slug>-scope.md` exists but no `<slug>.md` ⇒ scoped; **advance** runs `spec`, **refine** re-runs `scope`.
 8. only `<slug>-triage.md` exists (and the Blocked precondition did not fire) ⇒ triaged; **advance** runs `scope`, **refine** re-runs `triage`. If its `**Status**:` reads `Draft`, report the open entries per Step 6.5. Do **not** run `scope` until they are closed. The hand-off sentence requires every **Open** entry to be closed before it is acted on, and the scope agent cannot close them.
 9. nothing exists ⇒ **advance**/**refine** are errors; ask the developer for an idea first.
@@ -199,7 +225,8 @@ slug is at.
 For a **start** intent, kebab-case a slug from the idea **automatically**. Do not ask
 the developer to confirm it. Announce the chosen slug in your reply (e.g. "Using
 slug `partial-refunds`.") and proceed to the first call. If artifacts for that slug already
-exist, report the stage the rules above give. Then treat the request as
+exist — on disk, recorded by a PR, or committed on a `<prefix>/<slug>` branch per the ordered
+list above — report the stage the rules above give. Then treat the request as
 **advance**/**refine** rather than overwriting triage.
 
 ## Step 3 — fill the fields the developer never supplies
@@ -213,15 +240,16 @@ Fill each field as follows:
 - **`architect` / `branch_prefix`** — carry these forward from the prior stage's
   validated return *within a session*. That return does **not** survive `/resume` or
   session death. When conversational memory is absent, **recover them from the artifacts
-  on disk**:
+  on disk** (after Step 4 that means with `<prefix>/<slug>` checked out — see Step 2's
+  first paragraph):
   - `architect` - read `**Lane**:` from the frontmatter of `<specs_dir>/<slug>-triage.md`,
     find the lane in `config.lanes[]` whose `name` equals it, and use that lane's `architect`.
     A `**Lane**: unresolved` line means the triage is blocked. Then carry nothing forward, run nothing
     downstream, and report per Step 2's Blocked precondition. A lane name that matches no
     configured lane means the config changed after triage: report it and stop.
   - `branch_prefix` - the segment before `/` on the `**Branch**:` line of the same file. It
-    must be one of `<prefixes>`. It names the `<prefix>/<slug>` branch that implement and ship
-    operate on. A line with no `/` is the blocked form (`**Branch**: unresolved - triage blocked on routing`).
+    must be one of `<prefixes>`. It names the `<prefix>/<slug>` branch that the spec commit (Step 4),
+    implement, and ship operate on. A line with no `/` is the blocked form (`**Branch**: unresolved - triage blocked on routing`).
     Report it and stop.
 
   For these two, **prefer the in-memory return, and fall back to reading the artifact**.
@@ -231,10 +259,18 @@ Fill each field as follows:
 - **`phases`** — **always reconstruct from disk**, never from a return value. The spec
   stage deliberately returns no phases array. Every time you assemble an `implement`
   call, read these from `<specs_dir>/<slug>.md`: the `### Phase N: ` headings, the
-  `**Agent routing**:` lines, and each phase's `#### Scope` and `#### Acceptance Criteria`.
-  Reconstruct `[{ title, agent, scope, acceptance }]` from them (`title` is the heading text,
-  `agent` the single bare name on the routing line, `scope` and `acceptance` the blocks'
-  text verbatim). The on-disk spec is the single source of truth. This keeps hand-edits and
+  `**Agent routing**:` lines, the `**Design**:` lines, and each phase's `#### Scope` and
+  `#### Acceptance Criteria`. Reconstruct `[{ title, agent, design, scope, acceptance }]`
+  from them (`title` is the heading text, `agent` the single bare name on the routing line,
+  `scope` and `acceptance` the blocks' text verbatim). `design` is the `**Design**:` line
+  split on `; ` into an array of `## Proposed Design` subsection headings, copied character
+  for character; `[]` when the line reads `None`; `null` when the spec has no such line
+  (written before the line existed), which sends the dev agent and the reviewer to all of
+  `## Proposed Design` as before. The `**Design**:` line is one physical line. After
+  splitting it, verify each heading exists as a `### <heading>` line under
+  `## Proposed Design` (`grep -nF '### <heading>' <specs_dir>/<slug>.md`, and the hit's line
+  number falls inside that section). A miss is a spec defect: stop and report which phase and
+  which heading. Do not send the phase. The on-disk spec is the single source of truth. This keeps hand-edits and
   `refine` rounds made after the spec stage from silently diverging from what implement
   executes. The workflow rejects a phase whose `agent` is not a configured agent; if that
   happens, the spec's routing line is wrong, so report it rather than rewriting the agent.
@@ -246,16 +282,21 @@ Fill each field as follows:
   - Slice the reconstructed array to the suffix starting at the halted phase. Use the prior
     return's `results` (`passed: true` **and** `sound: true`) as the pass record.
   - A phase's pass counts only while its spec section is unchanged. If a `refine` round or
-    hand-edit touched a passed phase's title, Agent routing, Scope, or Acceptance
-    Criteria since the run that passed it, include that phase again.
+    hand-edit touched a passed phase's title, Agent routing, Design, Scope, or Acceptance
+    Criteria since the run that passed it, include that phase again. With the artifacts
+    tracked (Step 4), `git diff <phase-sha> -- <specs_dir>/<slug>.md` shows exactly what
+    changed in the spec since that phase's commit. It compares against the working tree, not
+    `HEAD`, so an uncommitted re-sync is visible.
   - With no in-memory return to consult (e.g. after `/resume`), do not guess. Do not blindly
     re-run from the top. Read the pass record from git instead. Every phase that passed was
     committed with a `Spec-Phase: <slug> / <title>` trailer:
     `git log --format='%(trailers:key=Spec-Phase,valueonly)' <base>..HEAD`. Slice at the first
     phase, in spec order, that has no trailer. The unchanged-spec-section rule above still
     applies. If the branch has implementation commits with no trailers (work from before
-    per-phase commits), fall back to checking each phase's Acceptance Criteria yourself (run
-    the named tests, read the named files) until the first unmet one, and slice there.
+    per-phase commits; the `docs(specs):` artifact commits and the `chore(specs):` removal
+    commit carry no trailer and are not implementation commits), fall back to checking each
+    phase's Acceptance Criteria yourself (run the named tests, read the named files) until the
+    first unmet one, and slice there.
 
 - **`implModel`** (optional, `implement` only) — the dev agents run on `config.models.impl` by
   default; the criteria checker runs on `models.check` and the per-phase architect review on
@@ -278,34 +319,62 @@ settled points. Pass `feedback` only when the stage's artifact exists on disk (i
 does after a successful run). If the prior run errored before writing anything, re-run the
 stage fresh with no `feedback`.
 
-## Step 4 — prepare the branch when entering implement
+## Step 4 — approve the spec: branch, Final, commit
 
-When the stage you are about to run is `implement` **and** the implementation has not
-started yet (the `<prefix>/<slug>` branch is not the current branch or does not exist),
-set up a fresh branch off the latest `<base>` **before** the Workflow call. The workflow's
-dev agents are forbidden from any branch operation, so this is your job:
+Run this step when the stage you are about to run is `implement`, before the Workflow call.
+It is the spec → implement boundary: the moment the spec is approved. Approval is whichever
+comes first: Step 6.6's gate clears on a `spec` return (including the re-check after the
+developer's answers close every open question), or the developer says **advance** while
+Step 2 places the slug at rule 6. No stage can do this for you: the spec stage returns
+before approval exists, and the workflow's dev agents are forbidden from any branch
+operation. Every sub-step is idempotent. Re-entering `implement` after a halt or a
+`/resume` runs them again and they change nothing.
 
-1. `git checkout <base> && git pull <remote> <base> && git fetch --prune <remote>`
-2. Create or switch to the branch: `git checkout -b <prefix>/<slug>`. If it already exists,
-   fall back to `git checkout <prefix>/<slug>`. This keeps re-runs idempotent.
+1. **Branch.** If `<prefix>/<slug>` is already checked out, skip to 2. Otherwise
+   `git checkout <base> && git pull <remote> <base> && git fetch --prune <remote>`, then
+   `git checkout -b <prefix>/<slug>`, falling back to `git checkout <prefix>/<slug>` if it
+   already exists. The artifacts are untracked until sub-step 3 commits them, and git
+   carries untracked files across `checkout`. Do not stop or ask the developer about them.
+2. **Final.** If `<specs_dir>/<slug>.md` reads `**Status**: Draft`, set it to
+   `**Status**: Final`. Without this, Step 2 (rules 3–5) cannot place the slug at implement,
+   validate, or ship, and a `/resume` would send it back to spec.
+3. **Commit.** `git add -- <specs_dir>/<slug>-triage.md <specs_dir>/<slug>-scope.md <specs_dir>/<slug>.md`
+   (whichever exist). If anything is staged, commit it: the first time through (the files
+   were untracked) as `git commit -m "docs(specs): add <slug> pipeline artifacts"`; on any
+   later pass, in Step 4a's revision form. If nothing is staged there is nothing to do.
+4. Confirm `<specs_dir>/<slug>.md` is present and reads `Final`. If it is missing, stop and
+   report it.
 
 Guards (the pipeline's own guardrail: one working tree; no worktrees; no `git stash`):
-- This slug's three artifacts are expected to be untracked here. They are committed at
-  ship (Step 7.1), not before, and git carries untracked files across `checkout`. Do not
-  commit them, and do not stop or ask the developer about them. Run steps 1–2 directly.
 - If a dirty working tree blocks `git checkout <base>` (git refuses the checkout), **stop
   and report** it. Let the developer commit or discard first. Never stash it away.
-- After step 2, confirm `<specs_dir>/<slug>.md` is present. If it is missing, stop and
-  report it.
-
-Entering `implement` is the spec's approval for implementation, whether the developer said
-**advance** or Step 6.6's gate advanced automatically. If `<specs_dir>/<slug>.md` still
-reads `**Status**: Draft`, set it to `**Status**: Final` before the Workflow call. Without
-this, Step 2 (rules 3–5) cannot place the slug at validate or ship after implement, and a
-`/resume` would send it back to implement.
+- If `git checkout <prefix>/<slug>` refuses because untracked artifacts would be
+  overwritten, the branch already holds committed artifacts for this slug and the copies on
+  disk were written on another branch. Stop and report; the developer chooses which survive.
+- If the commit fails (for example a pre-commit hook rejects it), stop and report its
+  output. Do not run `implement` with an uncommitted approved spec. The spec on disk already
+  reads `Final`, so Step 2 places the slug at implement and the next advance re-enters this
+  step and retries the commit. That is not a divergence.
 
 For every other stage (`triage`, `scope`, `spec`) and for `refine` re-runs that stay on
-the same stage, do no git work here.
+the same stage, do no git work here. Their artifacts stay untracked until this step commits
+them.
+
+### Step 4a — revision commits
+
+From the spec commit on, the three artifacts are tracked on `<prefix>/<slug>`. Every later
+edit to any of them is committed on its own, as soon as the orchestrator next has the tree,
+and never amended:
+`git add -- <specs_dir>/<slug>-triage.md <specs_dir>/<slug>-scope.md <specs_dir>/<slug>.md`,
+then `git commit -m "docs(specs): revise <slug>: <what changed>"`. After a rework-after-ship
+restore (Step 7) the three files are untracked again, so that commit re-adds all three and
+uses the `docs(specs): add <slug> pipeline artifacts` subject, not `revise`. This covers an
+inline refine (Step 1a), a structural refine's return (Step 6 item 2), a re-sync made by hand
+or by a dev agent during implement (the implement committer never stages `<specs_dir>/`, so
+such an edit sits on the tree until the next Step 4 pass or Step 7.1 commits it), and a
+rework after ship (Step 7). Follow-up commits, never amends: phase commits may already sit on
+top of the spec commit, and after ship the branch is pushed. A revision commit carries no
+`Spec-Phase` trailer and is not an implementation commit.
 
 ## Step 5 — invoke, at most once
 
@@ -334,7 +403,8 @@ When the workflow returns:
      entry in `unassigned_anchors` or `uncovered_anchors`. An entry is a scope goal (`G<n>`),
      a closed scope question (`OQ<n>`), or `phase: <title>`. An uncovered anchor is one no
      drafter delivered in a phase or explained. An uncovered phase came back from no drafter,
-     so the synthesizer wrote it from the plan's outline. The lists predate the revise rounds;
+     so the synthesizer wrote it from the plan's outline. The lists predate the revise rounds.
+     The return's log lines name the lenses run and whether `coherence` was skipped; report both;
    - at implement: per-phase pass/fail and the architect's concerns;
    - at validate: per-suite results.
 
@@ -373,12 +443,34 @@ When the workflow returns:
 2. Doc stages (`triage`/`scope`/`spec`) return a `critique` object: the critic's
    **final verdict on the artifact as written**. On a compose round it covers the full
    template audit, plus resolution of any issues it raised. For scope and spec, that audit
-   is a merged verdict from parallel lens critics. A dead lens counts as an issue in it,
-   never as clean. Any issue sends the merged verdict to the revise rounds, and the returned
-   `critique` is then the scoped re-check of those issues. Its issues are the re-check's own
-   text, with no lens prefix. On a `feedback` round it
-   covers only whether the feedback points were addressed, because the full audit happened
-   when the artifact was first composed. Report it:
+   is a merged verdict from parallel lens critics. Scope runs `template`, `fidelity:<partition
+   id>` per partition (plus `fidelity:unassigned`), and `tree`. Spec runs a four-lens panel:
+   - `template`: the upper sections, above the phases;
+   - `phases:<partition id>`: one per partition, over that partition's phase blocks only, plus
+     `phases:unassigned` for phases the plan assigned to no partition. This lens enforces the
+     spec template's acceptance-criteria rule. A phase over the bullet cap that cannot be
+     collapsed into named tests is a plan change: the lens raises it as an issue, the reviser
+     never splits, merges, or renumbers phases, and the issue reaches your gate;
+   - `fidelity:<partition id>`: one per partition, scope fidelity, plus `fidelity:unassigned`;
+   - `coherence`: the seams between sections and between phases. It runs after the others and
+     is skipped at one partition.
+
+   Plain-JS checks on the lens indexes add issues prefixed `[check]`. Every merged issue is
+   prefixed `[<lens>] `. A dead lens counts as an issue in it, never as clean: its `[<lens>]`
+   fallback issue restates what it would have checked. When the `template` lens returns no
+   `design_headings`, the Design-heading `[check]` is skipped for that round and the log says
+   so; Step 3's grep still verifies every heading before implement. Any issue sends the
+   merged verdict to the revise round(s) — one for `spec`, up to two for `scope` and
+   `triage` — and the returned `critique` is then the scoped re-check of those issues. For
+   scope and triage its issues are the re-check's own text, with no lens prefix. For spec the
+   re-check is partitioned by lens, and each re-check's issues are re-prefixed with the lens
+   they came from, so the prefixes survive the revise round. A spec still flagged after its
+   one round is written but stops at the gate for you. On a `feedback` round it covers only
+   whether the feedback points were addressed, because the full audit happened when the
+   artifact was first composed. On a `feedback` round for a tracked artifact (one Step 4 has
+   committed), commit the revised artifact per Step 4a after reporting the critique, whether
+   or not `clean` is true: the verdict decides whether the gate advances, not whether the
+   revision is recorded. Report it:
    - If `clean` is false, list the residual `issues` so the developer knows the artifact is
      written but still flagged.
    - If `critique` is `null`, say the verdict is unavailable (the critic agent died). Never
@@ -451,6 +543,12 @@ When the workflow returns:
      developer's pick per Step 1a, strip it and write the label exactly as it appears in the
      entry's own Options list.
    - **`header`** = a 12-char chip you derive (the stage does not supply one).
+   - **An answer off the list is expected, not an error.** The stage enumerated the readings
+     it could see; the developer may know one it could not, or may defer. Do not map such an
+     answer onto the nearest option and do not re-ask. Record it in the template's off-list
+     `Selected` form (Step 1a, item 2) and classify it per Step 1a: inline when it closes the
+     entry without invalidating a section, structural when it introduces a mechanism or amends
+     a settled decision the artifact builds on.
    - If `context` is missing or empty on an entry, that is a schema violation and should not
      happen. Say so plainly. Do not paper over it with a paragraph you invent from the
      artifact. The framing you'd reconstruct is not the one the stage had.
@@ -494,15 +592,21 @@ When the workflow returns:
    | `implement` | `halted` is null |
    | `validate` | `validation.passed` is true — then run ship (Step 7) |
 
+   A clear gate on a `spec` return is the spec's approval. The advance recipe below then runs
+   Step 4, which marks the spec Final and commits the three artifacts on `<prefix>/<slug>`
+   before the `implement` call. The developer's **advance** on a spec the gate stopped on (an
+   unclean critique, a listed anchor) is the same approval, given by hand.
+
    To advance:
    - Assemble the next stage's `args` exactly as an **advance** intent would: `config`,
-     Step 3's carried-forward fields, `phases` reconstructed from disk, and Step 4's branch
-     preparation and its guards.
+     Step 3's carried-forward fields, `phases` reconstructed from disk, and, when the next
+     stage is `implement`, Step 4's spec approval (branch, Final, commit) and its guards.
    - Announce in one line that you are advancing and why (e.g. "No open questions —
      advancing to `scope`.").
    - Invoke it per Step 5.
 
-   Any Step 4 guard that stops (dirty tree, missing spec) stops the chain too.
+   Any Step 4 guard that stops (dirty tree, refused checkout, missing spec, failed commit)
+   stops the chain too.
 
    When the gate stops on `open_questions` and the developer answers them (item 5), apply the
    answers. Then re-check the gate **against the artifact on disk**. If every entry is now
@@ -528,15 +632,17 @@ when that return clears the gate, or when the developer says **advance** and Ste
 the slug at **ship** (Step 2 rule 3). To ship, commit, push, and open the PR yourself in
 the main loop. There is no workflow stage past validate:
 
-1. **Spec commit.** The implement stage already committed each phase. Any implementation
-   change still on the tree came after it, e.g. a direct fix after a failed validate. Commit
-   those first, on their own: `git add -A -- . ':(exclude)<specs_dir>'`, then
-   `git commit -m "<concise message>"` if anything was staged. Then commit exactly this
-   slug's three artifacts, alone:
-   `git add <specs_dir>/<slug>-triage.md <specs_dir>/<slug>-scope.md <specs_dir>/<slug>.md`,
-   `git commit -m "docs(specs): add <slug> pipeline artifacts"`. Never `git add -A` over
-   `<specs_dir>/`: another workstream's uncommitted artifacts would ride along into this PR.
-   Record this commit's SHA as `<spec-sha>`.
+1. **Leftover commits.** The implement stage committed each phase, and Step 4 committed the
+   artifacts. Anything still on the tree came after: a direct fix after a failed validate, or
+   an artifact re-sync. Commit the code first, on its own:
+   `git add -A -- . ':(exclude)<specs_dir>'`, then `git commit -m "<concise message>"` if
+   anything was staged. Never `git add -A` over `<specs_dir>/`: another workstream's
+   uncommitted artifacts would ride along into this PR. Then commit any artifact revision
+   still on the tree per Step 4a. (If this slug's artifacts are still untracked here — a run
+   begun before Step 4 committed them — run Step 4's commit now instead.) Record
+   `git rev-parse HEAD` as `<spec-sha>`: the branch tip whose tree holds the artifacts' final
+   text, and the parent of step 4's removal commit. A permalink to the first spec commit
+   would point at text later revision commits superseded.
 2. `git push -u <remote> <prefix>/<slug>`
 3. `gh pr create --base <base>` — the body names the project (`config.project.name`) and the
    slug, and links the spec:
@@ -568,6 +674,11 @@ the main loop. There is no workflow stage past validate:
    relies on merge commits; a squash merge would drop `<spec-sha>` from `<base>`'s history.
    A repository that squash-merges sets `ship.remove_artifacts_after_pr` to `false` instead.
 
+The branch therefore reads: the spec commit, one commit per implement phase with revision
+commits wherever an artifact was edited, any ship-time leftovers, then (when
+`<remove_after_pr>` is true) the `chore(specs):` removal commit, which is the last commit on
+the branch. Nothing else commits under `<specs_dir>/`.
+
 If validate failed, do not ship. Surface the failures (Step 6) and stop. The developer
 decides whether to rewind to implement, refine, or fix directly. Any fix means validate
 must pass again before ship.
@@ -580,17 +691,21 @@ step 4 before stopping.
 
 **Rework after ship.** When `<remove_after_pr>` is true, once step 4 lands the artifacts
 are gone from the branch tip, and Step 3 reconstructs `phases` from `<specs_dir>/<slug>.md`.
-Before any `rewind` or `refine` on a shipped slug, restore them from the spec commit:
+Before any `rewind` or `refine` on a shipped slug, restore them from the pre-removal tip:
 `git restore --source=<spec-sha> -- <specs_dir>/<slug>-triage.md <specs_dir>/<slug>-scope.md <specs_dir>/<slug>.md`
 (recover `<spec-sha>` from the PR body's permalink, or as the parent of the removal
-commit). `git restore` writes the working tree only, so the restored files are untracked.
-A rework that re-runs `implement` commits its phases itself. After validate passes again,
-commit any direct fix still on the tree with only step 1's first `git add` (no artifact
-add), push to the existing PR, and then delete the restored files from the working tree.
-If the rework changed an artifact, instead commit the changed artifacts on their own, push,
-and run step 4 again, so the revision is recorded in history before it is removed.
+commit — the newest one, after an earlier rework). `git restore` writes the working tree
+only, so the restored files are untracked again, and the implement committer's
+`<specs_dir>` exclusion keeps them out of phase commits. A rework that re-runs `implement`
+commits its phases itself. After validate passes again, commit any direct fix still on the
+tree with Step 7.1's code `git add` only, push to the existing PR, and delete the restored
+files from the working tree. If the rework changed an artifact, instead commit the changed
+artifacts on their own in Step 4a's form, push, run step 4 again, and update the PR body's
+permalinks to the new `<spec-sha>` (the parent of the new removal commit;
+`gh pr edit <n> --body-file`), so the revision is recorded in history and the PR points at
+it before it is removed.
 When `<remove_after_pr>` is false, the artifacts are still on the branch: rework edits them
-in place, and commits any artifact it changed on its own after the fix.
+in place and commits each artifact revision per Step 4a.
 
 ## Guardrails
 

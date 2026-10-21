@@ -83,10 +83,10 @@ Anything else stops the chain and tells you exactly why.
 |---|---|---|---|---|
 | **Triage** | the triage agent (a lane architect by default) + a critic | `docs/specs/<slug>-triage.md` | `opus` | blocked routing, open decisions, a malformed or divergent return, an unclean critique |
 | **Scope** | the workstream's lane architect: a plan, 1-6 partition drafters, a synthesizer, parallel lens critics | `docs/specs/<slug>-scope.md` | `opus` | open questions, an unclean critique, a source commitment that may have been dropped |
-| **Spec** | the lane architect: a plan, 1-6 partition drafters, a synthesizer, parallel lens critics | `docs/specs/<slug>.md` | `fable` (top tier) | open questions, an unclean critique, a scope goal or phase that may have been dropped |
-| **Implement** | per phase: the routed agent, a criteria checker, the lane's architect, a committer | one commit per phase on branch `<prefix>/<slug>` | `opus` | the first phase with unmet criteria, a blocking concern, a failed commit, or a dead agent |
+| **Spec** | the lane architect: a plan, 1-6 partition drafters, a synthesizer, a four-lens critic panel plus plain-JS checks | `docs/specs/<slug>.md` | `fable` (top tier) | open questions, an unclean critique, a scope goal or phase that may have been dropped |
+| **Implement** | per phase: the routed agent, a criteria checker, the lane's architect, a committer | one commit per phase on branch `<prefix>/<slug>`, after the orchestrator's spec commit at approval | `opus` | the first phase with unmet criteria, a blocking concern, a failed commit, or a dead agent |
 | **Validate** | one runner agent | nothing (report only) | `sonnet` | any suite with a failure or an error |
-| **Ship** | the orchestrator itself | spec commit, push, PR | (main session) | a failed push or PR creation |
+| **Ship** | the orchestrator itself | leftover commits, push, PR, artifact removal | (main session) | a failed push or PR creation |
 
 ## What you get
 
@@ -245,30 +245,40 @@ The short version. The long versions are [`docs/mechanics.md`](docs/mechanics.md
   the only place a human can steer, and calls are strictly sequential.
 - **The gate.** After reviewing a return, the orchestrator auto-advances only when nothing needs you.
 - **Draft → critic → revise.** Each document stage drafts, gets one full adversarial audit against its
-  template, then up to two rounds of revise plus a narrow re-check of only the raised issues. A null critic
+  template, then revise rounds (up to two for triage and scope, one for spec) plus a narrow re-check of only
+  the raised issues. Whatever the spec's one round leaves flagged stops at the gate for you. A null critic
   verdict is "unknown", never "clean".
 - **Plan before drafting.** Scope and spec open with a plan agent that lists the source's commitments as
   anchors (a scope's are the source's decisions or sections; a spec's are the scope's goals) and splits them
   into 1-6 partitions sized to the source. One drafter per partition returns fragments, one synthesizer
   writes the file, and parallel lens critics audit it (template, per-partition fidelity, tree grounding for
-  scope; template, narrowest reader, scope fidelity, cross-partition coherence for spec). A dropped
-  commitment is a set difference computed in plain JavaScript, reported to you, never silent.
+  scope). Spec's panel bounds every critic's read: per-partition `phases` lenses read only their phase
+  blocks, `template` reads the sections above the plan, per-partition `fidelity` lenses read their goals,
+  design subsections, and phases, and a `coherence` lens reads only the seams the others' indexes point at.
+  Plain-JS checks over those indexes catch bad agent names, unresolved Design headings, backward
+  dependencies, over-cap criteria, and whole-suite runs. A dropped commitment is a set difference computed
+  in plain JavaScript, reported to you, never silent.
 - **Inline vs structural refine.** Most feedback (picking an option, fixing a word) is a 30-second direct
   edit by the orchestrator, with no workflow call. Feedback that cascades (a different lane, new goals, a new
   phase split) re-runs the same stage, which revises its artifact in place with one reviser and one critic
   scoped to your points. When unsure, inline.
 - **Blocked is a result.** Triage may decline to route ("this is two workstreams", "the premise is false").
   It writes a `Blocked` artifact with `B` entries, and nothing downstream runs until you answer.
-- **Three readers per spec phase.** The dev agent gets `#### Scope` inlined as its boundary. The criteria
-  checker gets `#### Acceptance Criteria` and nothing else. The architect reviewer reads the whole spec. Each
-  block is written for its narrowest reader.
+- **Three readers per spec phase, each with a bounded read.** Each phase names, on its `**Design**:` line,
+  the `## Proposed Design` subsections it implements. The dev agent gets `#### Scope` inlined as its boundary
+  and reads only the Core Principle, those subsections, and its own phase block. The criteria checker gets
+  `#### Acceptance Criteria` and nothing else: at most six behavioural checks, each one command or one test
+  selection. The architect reviewer reads the dev agent's sections plus `## Invariance`. Each block is
+  written for its narrowest reader.
 - **Targeted tests per phase, whole suite once.** Whole-suite criteria are marked `deferred` and settled by
   validate.
 - **One commit per phase.** Each phase that passes its checker and review is committed before the next
   starts, with a `Spec-Phase: <slug> / <title>` trailer. The PR reads phase by phase, and after `/resume` the
   trailers tell the orchestrator exactly which phases already passed.
-- **Ship keeps the record, then cleans the tree.** The artifacts get a commit of their own, the PR links the
-  spec by that commit's SHA, and a follow-up commit removes them from the branch tip.
+- **The spec is committed when it is approved.** Approval (the gate clearing on a spec, or your `advance`)
+  marks the spec `Final` and commits the three artifacts on `<prefix>/<slug>` before implement starts; every
+  later edit gets a revision commit of its own. At ship the PR links the spec at the pre-removal branch tip,
+  and a follow-up commit removes the artifacts from the branch tip.
 
 ## Day-to-day cheat sheet
 
@@ -290,13 +300,16 @@ context and 2-4 options, records your pick verbatim in the artifact, and resumes
 
 | Artifact | Written by | Lives |
 |---|---|---|
-| `docs/specs/<slug>-triage.md` | triage | untracked in your working tree until ship |
-| `docs/specs/<slug>-scope.md` | scope | untracked until ship |
-| `docs/specs/<slug>.md` | spec (`Draft`, flipped to `Final` when implement starts) | untracked until ship |
+| `docs/specs/<slug>-triage.md` | triage | untracked in your working tree until the spec is approved |
+| `docs/specs/<slug>-scope.md` | scope | untracked until the spec is approved |
+| `docs/specs/<slug>.md` | spec (`Draft`, flipped to `Final` at approval) | untracked until the spec is approved |
 
-At ship the three files get a commit of their own, after the per-phase implementation commits (and only
-this slug's three; other workstreams' drafts never ride along). The PR body links the spec at that commit's
-SHA. After the PR exists,
+When the spec is approved, the orchestrator creates `<prefix>/<slug>`, flips the spec to `Final`, and
+commits exactly this slug's three files (`docs(specs): add <slug> pipeline artifacts`; other workstreams'
+drafts never ride along). From then on they are tracked on that branch, and every later edit to them, inline
+or by a stage re-run, gets its own `docs(specs): revise <slug>: ...` commit. The branch reads: the spec
+commit, one commit per phase with revision commits where an artifact changed, any ship-time leftovers, then
+the removal. The PR body links the spec at the pre-removal branch tip's SHA. After the PR exists,
 a `chore(specs): remove <slug> pipeline artifacts` commit removes them from the branch tip, so your base
 branch stays clean while the full record remains in history. To rework a shipped slug, restore them with
 `git restore --source=<spec-sha> -- docs/specs/<slug>-triage.md docs/specs/<slug>-scope.md docs/specs/<slug>.md`.

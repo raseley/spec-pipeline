@@ -55,9 +55,6 @@ Ref `main` at `4f2a9c1`.
   figure is an `int` of cents end to end.
 ...
 
-## ORDER
-...
-
 ## VALIDATE
 
 Reframe as "what would a support agent double-clicking the refund button observe?" - under that reframing
@@ -98,7 +95,10 @@ question, then the options with the recommended one first:
 > - **Store on the order** - keep a running total; ...
 
 You pick "Compute on read" without comment. That is an **inline** closure: the orchestrator edits entry 1 in
-place (no workflow call), keeping Context and Options verbatim:
+place (no workflow call), keeping Context and Options verbatim. (Had you answered off the list, say "defer
+it until the reporting work lands", the entry would record
+`none of the listed options — deferred: <what decides it later>` rather than the nearest option.) The
+artifacts are still untracked, so no commit follows:
 
 ```markdown
 1. **Decided (2026-03-14)** - The refunded-so-far figure is computed when an order is read.
@@ -158,9 +158,21 @@ anchors `G1`-`G3`, fixes the core principle and a two-phase outline (`api-dev`, 
 scope this small, plans one partition. The drafter writes the current state, the design, and both full phase
 blocks as fragments; the synthesizer splices them into `docs/specs/partial-refunds.md` with a current-state
 section anchored at path and symbol, a design that cites real exemplars at `path:line`, an Invariance
-section, and two phases:
+section, and two phases. Each phase's `**Design**:` line names, character for character, the design
+subsections it implements:
 
 ```markdown
+## Proposed Design
+
+### Core Principle
+...
+### Refund ceiling in create_refund
+...
+### refunded_cents on the order response
+...
+### Refunded column in the order table
+...
+
 ## Invariance
 
 **Reframing**: a support agent submits the same partial refund twice in quick succession.
@@ -177,6 +189,8 @@ refunds already stored for that order and tenant.
 **Agent routing**: api-dev
 
 **Depends on**: None
+
+**Design**: Refund ceiling in create_refund; refunded_cents on the order response
 
 #### Scope
 
@@ -200,7 +214,8 @@ refunds already stored for that order and tenant.
 - [ ] `pytest api/tests/unit/test_refunds.py -q` passes, and `test_refund_exceeds_captured` and
       `test_refunded_cents_sums_refunds` are among the collected tests.
 - [ ] `pytest api/tests/contract/test_money_types.py -q` passes.
-- [ ] `git diff --name-only 4f2a9c1..HEAD -- api/migrations/` prints nothing.
+- [ ] `git diff --name-only 4f2a9c1..HEAD -- api/migrations/` prints nothing (enforces the **OUT**
+      exclusion: no migration).
 
 ### Phase 2: Show refunded-so-far in the order table
 
@@ -209,6 +224,8 @@ refunds already stored for that order and tenant.
 **Agent routing**: web-dev
 
 **Depends on**: Phase 1
+
+**Design**: Refunded column in the order table
 ...
 
 ## Open Questions
@@ -216,27 +233,46 @@ refunds already stored for that order and tenant.
 No open questions — implementation may begin.
 ```
 
-Note what the criteria avoid: no "Phase 1", no "the new field" without a path, no whole-suite run, and no
-`git diff` against `HEAD`. The checker will see this block and nothing else.
+Note what the criteria avoid: no "Phase 1", no "the new field" without a path, no whole-suite run, no
+`git diff` against `HEAD`, and no shape check (a field listing, a definition count). Each bullet runs one
+command, each passes or fails on what the code does, and the phase stays well under the cap of six. The
+checker will see this block and nothing else.
 
-Its lens critics (`template`, `phases:<partition>` reading each phase block alone, `fidelity:<partition>`
-checking each scope goal lands in a delivering phase, and `coherence`) come back clean, there are no
-questions, so the gate advances to implement.
+Its lens critics run with bounded reads: `phases:<partition>` reads only the phase blocks and returns an
+index of each (agent, Depends on, Design headings, Scope IN paths, criteria count, test runs); `template`
+reads the sections above the plan plus Standards References and Open Questions and returns the
+`### ` headings under `## Proposed Design`; `fidelity:<partition>` checks that each scope goal lands in a
+delivering phase and that each phase's Tasks agree with the subsections its Design line names. Plain-JS
+checks over the two indexes find no `[check]` issue (every agent is routable, every Design heading exists,
+Depends on points backwards, no phase is over six criteria, no criterion runs a configured suite whole). With
+one partition there are no drafter seams, so `coherence` is skipped and the log says so. The merged verdict
+is clean, there are no questions, so the gate advances to implement.
 
 ## 6. Implement
 
-Entering implement is the spec's approval. The orchestrator:
+The clear gate on the spec return is the spec's approval. Before the implement call the orchestrator
+approves it (Step 4):
 
-1. sets the spec to `**Status**: Final`;
-2. runs `git checkout main && git pull origin main && git fetch --prune origin`, then
+1. runs `git checkout main && git pull origin main && git fetch --prune origin`, then
    `git checkout -b feat/partial-refunds` (the three untracked artifacts come along);
-3. rebuilds `phases` from the spec file (`[{ title: "Enforce the refund ceiling and expose refunded_cents",
-   agent: "api-dev", scope: "...", acceptance: "..." }, { title: "Show refunded-so-far in the order table",
-   agent: "web-dev", ... }]`) and calls the workflow with `architect: "api-architect"`.
+2. sets the spec to `**Status**: Final`;
+3. commits the three artifacts, alone, as the first commit on the branch:
+   `git add -- docs/specs/partial-refunds-triage.md docs/specs/partial-refunds-scope.md docs/specs/partial-refunds.md`,
+   `git commit -m "docs(specs): add partial-refunds pipeline artifacts"`;
+4. rebuilds `phases` from the spec file (`[{ title: "Enforce the refund ceiling and expose refunded_cents",
+   agent: "api-dev", design: ["Refund ceiling in create_refund", "refunded_cents on the order response"],
+   scope: "...", acceptance: "..." }, { title: "Show refunded-so-far in the order table", agent: "web-dev",
+   design: ["Refunded column in the order table"], ... }]`), confirms with `grep -nF` that each design heading
+   is a `### ` line under `## Proposed Design`, and calls the workflow with `architect: "api-architect"`.
 
-Per phase: the dev agent implements, the checker runs the named tests, the architect of the agent's own
-lane reviews (`api-architect` for phase 1, `web-architect` for phase 2), and a committer commits the passed
-phase with a `Spec-Phase: partial-refunds / <title>` trailer before the next phase starts. The return:
+From here on, any edit to an artifact (an inline refine, a re-sync during implement) gets its own
+`docs(specs): revise partial-refunds: <what changed>` commit; the spec stays `Final`.
+
+Per phase: the dev agent implements, reading only `### Core Principle`, the subsections its Design line names,
+and its own phase block; the checker runs the named tests from the criteria alone; the architect of the
+agent's own lane reviews the same sections plus `## Invariance` (`api-architect` for phase 1,
+`web-architect` for phase 2); and a committer, reading only the phase block, commits the passed phase with a
+`Spec-Phase: partial-refunds / <title>` trailer before the next phase starts. The return:
 
 ```json
 {
@@ -291,10 +327,9 @@ Green, so the gate runs ship.
 
 ## 8. Ship
 
-1. The two phase commits are already on the branch, and nothing else changed since validate. So the only new
-   commit is the spec commit:
-   `git add docs/specs/partial-refunds-triage.md docs/specs/partial-refunds-scope.md docs/specs/partial-refunds.md`,
-   `git commit -m "docs(specs): add partial-refunds pipeline artifacts"`; its SHA is `<spec-sha>`.
+1. The spec commit and the two phase commits are already on the branch, and nothing changed since validate,
+   so there are no leftover commits. `git rev-parse HEAD` is `<spec-sha>`: the tip whose tree holds the
+   artifacts' final text.
 2. `git push -u origin feat/partial-refunds`.
 3. `gh pr create` with a body like:
 
@@ -317,6 +352,8 @@ Green, so the gate runs ship.
 
 4. `git rm` the three artifacts, `git commit -m "chore(specs): remove partial-refunds pipeline artifacts"`,
    `git push`.
+
+The branch now reads: the spec commit, the two phase commits, then the removal commit.
 
 The orchestrator reports the PR URL and stops. The base branch never sees the artifacts on its tip, yet the
 whole record (verified claims, the refund decision and who made it, the design, every acceptance criterion) is
