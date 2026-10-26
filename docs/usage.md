@@ -32,6 +32,7 @@ Only one stage runs at a time. If a stage is running, wait for it.
 | **Plan agent died** (scope, spec) | "plan agent returned no result; nothing written" | Re-run the stage. |
 | **Halted phase** | The phase, its unmet criteria and blocking concerns, the phases not yet run | Fix directly, `refine:` the spec, `rewind`, or escalate. Then `advance` re-sends from the halted phase. |
 | **Phase commit failed** | A passed, sound phase with a commit `error`, usually a pre-commit hook's output | Fix what the hook flagged. The orchestrator then commits the phase by hand with its `Spec-Phase` trailer, and `advance` continues from the next phase. |
+| **Phase trailer missing** | A committed phase whose `error` says git parses its `Spec-Phase` trailer as something else | The orchestrator amends the trailer onto that commit while it is still the branch tip and confirms it reads back. `advance` continues from the next phase; the phase is not resent. |
 | **Validate failed** | Per-suite counts and failing test ids | Fix, then `advance` (validate runs again). Never ship on red. |
 
 When reading implement results:

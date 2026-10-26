@@ -97,8 +97,9 @@ the suffix starting at the halted phase, using the previous return's `passed: tr
 the pass record. A passed phase whose title, routing, Design, Scope, or Acceptance Criteria changed since is
 sent again; with the artifacts tracked, `git diff <phase-sha> -- <specs_dir>/<slug>.md` shows what changed. With no return in memory (after `/resume`), it reads the pass record from git: every passed phase was
 committed with a `Spec-Phase: <slug> / <title>` trailer, so
-`git log --format='%(trailers:key=Spec-Phase,valueonly)' <base>..HEAD` lists them, and it slices at the first
-phase in spec order with no trailer. The `docs(specs):` and `chore(specs):` commits carry no trailer and are
+`git log --format='%(trailers:key=Spec-Phase,valueonly)' <base>..HEAD` lists them. Phase commits from 0.3.0
+and earlier can carry the line as unparsed body text, so it also greps `git log --format=%B <base>..HEAD` for
+`^Spec-Phase: <slug> / `, and it slices at the first phase in spec order that neither read names. The `docs(specs):` and `chore(specs):` commits carry no trailer and are
 not implementation commits. Only for a branch whose implementation commits carry no trailers does it fall back to checking each phase's criteria itself until the first unmet one.
 
 ## Spec approval (Step 4) and revision commits (Step 4a)
@@ -257,9 +258,10 @@ Then, strictly in sequence (one working tree, no worktrees), for each phase:
       │                                                     or args.architect for unlaned agents
       │ unsound / null / any blocking concern ─► halt, sound: false
 (d) committer                      models.commit  stages the tree minus <specs_dir> (artifacts are committed
-      │                                           by the command, Steps 4 and 4a), commits with a
-      │                                           `Spec-Phase: <slug> / <title>` trailer
+      │                                           by the command, Steps 4 and 4a), commits with
+      │                                           `--trailer 'Spec-Phase: <slug> / <title>'`
       │ failed commit / null ─► halt (the phase passed; its work is on the tree, uncommitted)
+      │ trailer git does not parse back ─► halt (the phase is committed; amend the trailer on)
       ▼ next phase
 ```
 
@@ -277,7 +279,12 @@ Then, strictly in sequence (one working tree, no worktrees), for each phase:
   `protected_guards` and source-shape guards that mechanize an invariant are never findings. Every concern
   carries `severity` (`blocking`/`observation`) and an `anchor`.
 - The committer writes a subject in the repository's own convention (a conventional commit where the log
-  shows none), a short prose body, and the `Spec-Phase` trailer. It reports staged paths the phase scope does
+  shows none), a short prose body, and the session's attribution trailers as one contiguous final paragraph.
+  It never writes the `Spec-Phase` line itself: git reads trailers only from a message's last paragraph, and
+  a stray blank line turned a hand-written one into body text. It passes the line to
+  `git commit --trailer` (single-quoted, apostrophes escaped), which merges it into the trailer block, then
+  returns what `git log -1 --format='%(trailers:key=Spec-Phase,valueonly)' HEAD` prints as `trailer`. A
+  mismatch halts the loop with the phase committed. It reports staged paths the phase scope does
   not name as `unexpected` but commits them anyway. It never passes `--no-verify`, never amends, and never
   edits source to satisfy a hook. Nothing staged is `committed: false` with no error, which is not a halt.
 

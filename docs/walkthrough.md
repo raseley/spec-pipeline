@@ -272,7 +272,8 @@ Per phase: the dev agent implements, reading only `### Core Principle`, the subs
 and its own phase block; the checker runs the named tests from the criteria alone; the architect of the
 agent's own lane reviews the same sections plus `## Invariance` (`api-architect` for phase 1,
 `web-architect` for phase 2); and a committer, reading only the phase block, commits the passed phase with a
-`Spec-Phase: partial-refunds / <title>` trailer before the next phase starts. The return:
+`Spec-Phase: partial-refunds / <title>` trailer (passed to `git commit --trailer`, then read back) before the
+next phase starts. The return:
 
 ```json
 {
@@ -295,7 +296,7 @@ agent's own lane reviews the same sections plus `## Invariance` (`api-architect`
             "anchor": "## Goals, goal 2" }
         ]
       },
-      "commit": { "committed": true, "sha": "9b1e7d0...", "subject": "feat(refunds): cap partial refunds at the captured total", "unexpected": [] }
+      "commit": { "committed": true, "sha": "9b1e7d0...", "subject": "feat(refunds): cap partial refunds at the captured total", "trailer": "partial-refunds / Enforce the refund ceiling and expose refunded_cents", "unexpected": [] }
     },
     { "phase": "Show refunded-so-far in the order table", "passed": true, "sound": true, "criteria": [...], "review": {...}, "commit": {...} }
   ]

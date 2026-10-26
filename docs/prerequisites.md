@@ -26,9 +26,10 @@ command passes the configuration and the date in `args`, and why the script neve
 The orchestrator runs `rev-parse`, `checkout` / `checkout -b`, `pull`, `fetch --prune`, `add` with an
 `:(exclude)` pathspec, `commit`, `push -u`, `rm`, `restore --source`, `log` with a trailer format, and two
 `diff` shapes. The implement stage's per-phase committer runs `add`, `diff --cached`, `log`, and
-`commit -F`; it never bypasses a pre-commit hook, so a hook that rejects a phase halts implement until you
+`commit -F --trailer`; it never bypasses a pre-commit hook, so a hook that rejects a phase halts implement until you
 fix what it flagged. **What good looks like**: `git pull <remote> <base>` works non-interactively, and git is
-2.22 or newer (re-entry after `/resume` reads `git log --format='%(trailers:key=Spec-Phase,valueonly)'`).
+2.32 or newer (the committer places the `Spec-Phase` trailer with `git commit --trailer`, and re-entry after
+`/resume` reads it back with `git log --format='%(trailers:key=Spec-Phase,valueonly)'`).
 
 ### 3. The `gh` CLI, authenticated
 

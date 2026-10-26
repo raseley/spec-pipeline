@@ -51,8 +51,18 @@ handful of agents.
 
 The phase passed its checker and review, but `git commit` failed, almost always on a pre-commit hook. The
 committer never edits source or passes `--no-verify`, because that would bypass the review. Fix what the hook
-reported; the orchestrator then commits the phase by hand (`git add -A -- . ':(exclude)<specs_dir>'` and a
-`Spec-Phase: <slug> / <title>` trailer) and `advance` continues from the next phase.
+reported; the orchestrator then commits the phase by hand (`git add -A -- . ':(exclude)<specs_dir>'` and
+`git commit -F <message file> --trailer 'Spec-Phase: <slug> / <title>'`) and `advance` continues from the
+next phase.
+
+### Implement halted with "git parses its Spec-Phase trailer as ..."
+
+The phase passed and is committed, but `git log -1 --format='%(trailers:key=Spec-Phase,valueonly)' HEAD` does
+not print `<slug> / <title>`, so re-entry slicing after `/resume` could not see it. Before any other commit,
+while that commit is still the branch tip, the orchestrator runs
+`git commit --amend --no-edit --trailer 'Spec-Phase: <slug> / <title>'` (each `'` in the title written as
+`'\''`), confirms the trailer now reads back, and `advance` continues from the next phase. Do not resend the
+phase.
 
 ### `input_schema does not support oneOf, allOf, or anyOf at the top level`
 
@@ -176,4 +186,5 @@ instead of inventing a paragraph. Re-run the stage.
 
 Say `advance`. The orchestrator re-derives the stage from the files, the branch, and `gh`, and recovers the
 architect and branch prefix from the triage artifact. After an implement halt, it reads the `Spec-Phase`
-trailers in `git log <base>..HEAD` to find the first phase that has not passed rather than guessing.
+trailers in `git log <base>..HEAD` (and, for phase commits from 0.3.0 and earlier, `Spec-Phase` lines left in
+the message body) to find the first phase that has not passed rather than guessing.

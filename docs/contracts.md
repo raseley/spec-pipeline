@@ -87,7 +87,7 @@ in #2 and #3 are em dashes, and that difference is load-bearing.
 | 23 | Inline-refine rationale `selected by the developer without stated rationale` | command |
 | 24 | Removal commit message `chore(specs): remove <slug> pipeline artifacts` | command |
 | 26 | Artifact commit subjects `docs(specs): add <slug> pipeline artifacts` (the spec commit at approval, Step 4) and `docs(specs): revise <slug>: <what changed>` (every later artifact edit, Step 4a); neither carries a `Spec-Phase` trailer, and Step 2 rule 3 does not count them as implementation commits | command |
-| 25 | Phase-commit trailer `Spec-Phase: <slug> / <title>` (the pass record re-entry slicing reads from `git log` after `/resume`) | script implement committer, command Steps 3 and 6.3 |
+| 25 | Phase-commit trailer `Spec-Phase: <slug> / <title>` (the pass record re-entry slicing reads from `git log` after `/resume`) | script implement committer (passed to `git commit --trailer` and read back), command Steps 3 and 6.3 |
 
 ## 4. The three closed-entry shapes, side by side
 

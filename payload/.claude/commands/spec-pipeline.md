@@ -290,9 +290,12 @@ Fill each field as follows:
   - With no in-memory return to consult (e.g. after `/resume`), do not guess. Do not blindly
     re-run from the top. Read the pass record from git instead. Every phase that passed was
     committed with a `Spec-Phase: <slug> / <title>` trailer:
-    `git log --format='%(trailers:key=Spec-Phase,valueonly)' <base>..HEAD`. Slice at the first
-    phase, in spec order, that has no trailer. The unchanged-spec-section rule above still
-    applies. If the branch has implementation commits with no trailers (work from before
+    `git log --format='%(trailers:key=Spec-Phase,valueonly)' <base>..HEAD`. Phase commits made
+    before the committer handed the trailer to git (spec-pipeline 0.3.0 and earlier) can carry
+    the line as body text after a blank line, where git does not parse it, so also read
+    `git log --format=%B <base>..HEAD | grep '^Spec-Phase: <slug> / '`. A phase is recorded if
+    either read names it. Slice at the first phase, in spec order, that neither read names. The
+    unchanged-spec-section rule above still applies. If the branch has implementation commits with no trailers (work from before
     per-phase commits; the `docs(specs):` artifact commits and the `chore(specs):` removal
     commit carry no trailer and are not implementation commits), fall back to checking each
     phase's Acceptance Criteria yourself (run the named tests, read the named files) until the
@@ -514,16 +517,26 @@ When the workflow returns:
      a blocking concern, the workflow fails closed and halts anyway. Report it as the
      contradiction it is.
    - **Each phase that passed review carries `commit`**: `committed`, `sha`, `subject`,
-     `unexpected`, and `error`. Report each phase's short SHA and subject with its result.
+     `trailer`, `unexpected`, and `error`. Report each phase's short SHA and subject with its
+     result.
      `committed: false` with no `error` means the phase left nothing to stage. Report that,
      but it is not a failure. List any `unexpected` paths (staged paths the phase scope does not
      name). They are already in the commit, and the developer decides whether they belong.
      A halt with `error` set on a passed, sound phase means the commit failed, usually a
      pre-commit hook. The phase's work is reviewed but uncommitted on the tree. Report the
      hook output. The developer fixes the complaint, and then you commit the phase by hand,
-     staging with `git add -A -- . ':(exclude)<specs_dir>'` and adding the
-     `Spec-Phase: <slug> / <title>` trailer. Do not resend that phase. Re-entry slicing starts
-     at the phase after it.
+     staging with `git add -A -- . ':(exclude)<specs_dir>'` and committing with
+     `git commit -F <message file> --trailer 'Spec-Phase: <slug> / <title>'` (write no
+     `Spec-Phase` line in the message itself). Do not resend that phase. Re-entry slicing
+     starts at the phase after it.
+     A halt whose `error` says the phase was committed but git parses its `Spec-Phase` trailer
+     as something else means the work is committed but the pass record is missing. Before any
+     other commit, while that commit is still the branch tip, run
+     `git commit --amend --no-edit --trailer 'Spec-Phase: <slug> / <title>'`. Do not resend
+     that phase either.
+     After either repair, confirm that
+     `git log -1 --format='%(trailers:key=Spec-Phase,valueonly)' HEAD` prints
+     `<slug> / <title>`. Inside the single quotes, write each `'` in the title as `'\''`.
 4. The `validate` return carries `validation.passed` plus per-suite results. If it
    failed, report each suite's failures. Do not treat the workstream as shippable. The
    workflow fails closed: a configured suite with no passing report counts as failed even

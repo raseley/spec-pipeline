@@ -216,6 +216,8 @@ rewrites work already on the tree.
 **Mechanism.** The implement loop breaks at the first unmet criteria check, unsound review, failed commit, or
 dead agent and returns `halted`. Every phase that passes is committed before the next starts, with a
 `Spec-Phase: <slug> / <title>` trailer, so a halted phase's work is the only uncommitted work on the tree.
+Git places that trailer (`git commit --trailer`) and the committer reports what git parses back; a mismatch
+halts, because a pass record git cannot read is no record at all.
 The command slices re-entry to the unpassed suffix; a pass is void once the phase's spec text changed; after
 `/resume` it reads the pass record from the trailers in `git log <base>..HEAD` rather than guessing.
 

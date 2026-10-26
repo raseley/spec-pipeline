@@ -2031,6 +2031,8 @@ if (stage === "implement") {
   // carries one commit per phase and a halted phase's work is the only uncommitted work on the
   // tree. Every phase commit carries a `Spec-Phase: <slug> / <title>` trailer. After /resume, that
   // trailer is the pass record that the command doc's Step 3 re-entry slicing reads from git log.
+  // Git, not the committer, places the trailer (`git commit --trailer`), and the loop halts on a
+  // commit whose trailer git does not parse back, so the record cannot silently go missing.
   const results = [];
   let halted = null;
   const GENERIC_GUARD = "a source-shape guard that mechanizes an invariant no runtime test can observe";
@@ -2276,6 +2278,15 @@ if (stage === "implement") {
     // commit anyway. A failed commit (usually a pre-commit hook) halts the loop. The phase has
     // still passed review, so re-entry does not resend it. The developer fixes and commits it by
     // hand (command doc Step 6.3).
+    //
+    // Git reads trailers only from a message's last paragraph. A committer that wrote the
+    // Spec-Phase line itself sometimes left a blank line before the attribution trailers, which
+    // turned it into body text that re-entry slicing cannot see. So the committer never writes
+    // that line. It passes it to `git commit --trailer`, which merges it into the attribution
+    // block or starts one. The argument is single-quoted here because phase titles can contain
+    // apostrophes.
+    const specPhase = `${slug} / ${p.title}`;
+    const trailerArg = `'Spec-Phase: ${specPhase.replace(/'/g, `'\\''`)}'`;
     const commit = await agent(
       `Commit the verified implementation of phase "${p.title}" of ${SPECS}/${slug}.md.
 
@@ -2293,11 +2304,16 @@ if (stage === "implement") {
             and pick the type from the change (feat, fix, refactor, test, docs, chore).
           - Body: prose wrapped at 72 columns. Say what the phase changed and why, in a few
             sentences. Do not list every file.
-          - Trailers, as the final paragraph, in this order:
-            \`Spec-Phase: ${slug} / ${p.title}\`
-            then any Co-Authored-By trailer your session's attribution instructions give.
-       5. Commit with \`git commit -F <message file>\`, writing the message file under your
-          scratchpad directory, outside the repository.
+          - Trailers: any attribution trailers your session's attribution instructions give,
+            as one contiguous final paragraph with no blank line between them.
+          - Do not write a Spec-Phase line anywhere in the message. Git adds it in step 5.
+       5. Commit with \`git commit -F <message file> --trailer ${trailerArg}\`, writing the
+          message file under your scratchpad directory, outside the repository. Pass the
+          --trailer argument exactly as written here, quotes included.
+       6. If the commit succeeded, run
+          \`git log -1 --format='%(trailers:key=Spec-Phase,valueonly)' HEAD\` and return its
+          output, trailing newlines stripped, as "trailer". Report it as git printed it, even
+          if it is empty.
 
        CONSIDERING. Never pass --no-verify. Never amend, reset, rebase, or switch branches. Never
        edit a source file, including to satisfy a pre-commit hook. The code has already been
@@ -2305,7 +2321,7 @@ if (stage === "implement") {
        committed=false with the hook's or git's error output in "error".
 
        OUTPUT. Return committed, the new commit's full SHA from \`git rev-parse HEAD\`, the
-       subject, unexpected, and error.\n--- phase scope ---\n${p.scope}\n--- end phase scope ---`,
+       subject, trailer, unexpected, and error.\n--- phase scope ---\n${p.scope}\n--- end phase scope ---`,
       {
         label: `commit:${p.title}`, phase: "Implement", model: M.commit,
         schema: {
@@ -2314,6 +2330,7 @@ if (stage === "implement") {
             committed:  { type: "boolean" },
             sha:        { type: "string" },
             subject:    { type: "string" },
+            trailer:    { type: "string" },
             unexpected: { type: "array", items: { type: "string" } },
             error:      { type: "string" }
           }
@@ -2331,6 +2348,16 @@ if (stage === "implement") {
     }
     const unexpected = Array.isArray(commit.unexpected) ? commit.unexpected : [];
     if (unexpected.length) log(`phase "${p.title}" commit ${commit.sha} included paths outside the phase scope: ${unexpected.join(", ")}.`);
+    // A commit whose trailer git does not parse back is invisible to re-entry slicing, so it
+    // halts. The work is committed and the commit is the branch tip, so the developer amends the
+    // trailer onto it instead of resending the phase (command doc Step 6.3).
+    const parsed = (commit.trailer || "").trim();
+    if (commit.committed && parsed !== specPhase) {
+      halted = p.title;
+      entry.error = `phase committed as ${commit.sha}, but git parses its Spec-Phase trailer as "${parsed}", not "${specPhase}"`;
+      log(`implement halted at phase "${p.title}": ${entry.error}; later phases not run.`);
+      break;
+    }
   }
   // Deferred criteria are the whole-suite claims the checker replaced with a scoped run. They are
   // exactly the debt the validate stage settles. So the count goes in the stage's summary, not

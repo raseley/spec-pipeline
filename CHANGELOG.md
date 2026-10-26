@@ -4,6 +4,27 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-26
+
+### Fixed
+- The implement committer no longer writes the `Spec-Phase` line itself. A blank line before the attribution
+  trailers turned a hand-written line into body text, which git does not parse as a trailer, so re-entry
+  slicing after `/resume` could not see those phases. The committer now writes only the attribution trailers
+  and passes `Spec-Phase: <slug> / <title>` to `git commit --trailer` (single-quoted, apostrophes escaped),
+  so git merges it into the trailer block.
+
+### Added
+- The phase `commit` object carries `trailer`: what `git log -1 --format='%(trailers:key=Spec-Phase,valueonly)'`
+  parses back. A committed phase whose trailer does not match halts the loop; the command doc's Step 6.3
+  repairs it with `git commit --amend --no-edit --trailer ...` while the commit is still the branch tip.
+- Step 3 re-entry slicing also greps the message bodies in `git log --format=%B <base>..HEAD` for
+  `Spec-Phase` lines, so phase commits made by 0.3.0 and earlier still count as passed.
+
+### Changed
+- Hand commits after a failed phase commit (Step 6.3) use `git commit -F <message file> --trailer` instead of
+  writing the trailer into the message.
+- Git 2.32 or newer is required (for `git commit --trailer`); previously 2.22.
+
 ## [0.3.0] - 2026-10-21
 
 ### Added
